@@ -2,7 +2,7 @@
 
 Falcon Vision is an industrial safety monitoring project with a FastAPI backend, MongoDB, JWT authentication, a React/Vite frontend, employee face enrollment, and monitoring-time face recognition.
 
-This repository now contains the backend, frontend, and project documentation.
+This repository now contains the backend, frontend, project documentation, and additional research/model assets that already existed in the destination repository.
 
 ## Current scope
 
@@ -23,6 +23,13 @@ Implemented frontend modules in this repo:
 - backend-connected login and signup
 - employee face upload page connected to the backend
 - monitoring page with browser camera capture and recognition requests
+
+Existing model/research assets also present in this repo:
+
+- PPE detection assets in `PPE/`
+- fall detection assets in `Fall model/`
+- LLM experimentation notebook in `LLM/`
+- original zipped UI archive in `Web UI/`
 
 ## Important model
 
@@ -73,6 +80,10 @@ FalconVision/
 │   ├── requirements.txt
 │   └── README.md
 ├── docs/
+├── PPE/
+├── Fall model/
+├── LLM/
+├── Web UI/
 └── .env
 ```
 
