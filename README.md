@@ -1,8 +1,8 @@
 # Falcon Vision
 
-Falcon Vision is an industrial safety monitoring project with a FastAPI backend, MongoDB, JWT authentication, employee face enrollment, and monitoring-time face recognition.
+Falcon Vision is an industrial safety monitoring project with a FastAPI backend, MongoDB, JWT authentication, a React/Vite frontend, employee face enrollment, and monitoring-time face recognition.
 
-This repository currently contains the backend code and project documentation. The frontend exists in a separate local project and is not included in this repository.
+This repository now contains the backend, frontend, and project documentation.
 
 ## Current scope
 
@@ -15,6 +15,14 @@ Implemented backend modules in this repo:
 - employee face image upload
 - face recognition during monitoring
 - Postman collection for testing
+
+Implemented frontend modules in this repo:
+
+- React + Vite app in `frontend/`
+- admin and supervisor route separation
+- backend-connected login and signup
+- employee face upload page connected to the backend
+- monitoring page with browser camera capture and recognition requests
 
 ## Important model
 
@@ -54,6 +62,10 @@ Important:
 
 ```text
 FalconVision/
+├── frontend/
+│   ├── src/
+│   ├── package.json
+│   └── vite.config.ts
 ├── backend/
 │   ├── app/
 │   ├── postman/
@@ -81,6 +93,20 @@ API will run at:
 
 - `http://127.0.0.1:8000`
 - Swagger docs: `http://127.0.0.1:8000/docs`
+
+## Frontend setup
+
+From the project root:
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+Frontend will run at:
+
+- `http://127.0.0.1:5173`
 
 ## Environment variables
 

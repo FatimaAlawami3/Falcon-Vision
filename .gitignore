@@ -16,5 +16,6 @@ coverage.xml
 dist/
 build/
 node_modules/
+.vscode/
 .DS_Store
 Thumbs.db
