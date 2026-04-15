@@ -156,4 +156,3 @@ Recommended order:
 - upload the face images first before testing monitoring recognition
 - if you change collection structure, update `scripts/create_indexes.py`
 - if you add new routes, keep business logic in services and Mongo queries in repositories
-
