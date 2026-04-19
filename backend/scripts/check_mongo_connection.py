@@ -26,18 +26,18 @@ def mask_mongo_uri(uri: str) -> str:
 async def main() -> None:
     settings = get_settings()
     print(f"Python SSL: {ssl.OPENSSL_VERSION}")
-    print(f"Mongo URI: {mask_mongo_uri(settings.mongo_uri)}")
-    print(f"Database: {settings.mongo_db_name}")
+    print(f"Mongo URI: {mask_mongo_uri(settings.MONGO_URI)}")
+    print(f"Database: {settings.MONGO_DB_NAME}")
 
     client = AsyncIOMotorClient(
-        settings.mongo_uri,
+        settings.MONGO_URI,
         tlsCAFile=certifi.where(),
         serverSelectionTimeoutMS=10000,
     )
 
     try:
         await client.admin.command("ping")
-        db = client[settings.mongo_db_name]
+        db = client[settings.MONGO_DB_NAME]
         collections = await db.list_collection_names()
         print("MongoDB connection: OK")
         print(f"Collections found: {len(collections)}")

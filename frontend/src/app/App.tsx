@@ -37,6 +37,7 @@ export default function App() {
         >
           <Route path="/admin" element={<AdminHomePage />} />
           <Route path="/admin/upload-regulation" element={<UploadRegulationPage />} />
+          <Route path="/admin/monitoring" element={<MonitoringPage />} />
           <Route path="/admin/settings" element={<AdminSettingsPage />} />
           <Route path="/admin/profile" element={<AdminProfilePage />} />
           <Route path="/admin/upload-faces" element={<UploadEmployeeFacesPage />} />

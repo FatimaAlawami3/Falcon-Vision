@@ -6,6 +6,7 @@ from app.api.deps import get_current_user, get_employee_face_service
 from app.schemas.employee_face_schema import (
     EmployeeFaceUploadResponse,
     FaceRecognitionResponse,
+    FaceRecognitionStatusResponse,
 )
 from app.services.employee_face_service import EmployeeFaceService
 
@@ -30,3 +31,11 @@ async def recognize_employee_face(
     current_user: Annotated[dict, Depends(get_current_user)],
 ) -> FaceRecognitionResponse:
     return await employee_face_service.recognize_face(file, current_user)
+
+
+@router.get("/status", response_model=FaceRecognitionStatusResponse)
+async def get_face_recognition_status(
+    employee_face_service: Annotated[EmployeeFaceService, Depends(get_employee_face_service)],
+    current_user: Annotated[dict, Depends(get_current_user)],
+) -> FaceRecognitionStatusResponse:
+    return await employee_face_service.get_face_recognition_status(current_user)

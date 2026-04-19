@@ -3,6 +3,7 @@ from datetime import datetime
 from pydantic import BaseModel
 
 from app.models.regulation_model import StoredFile
+from app.schemas.alert_schema import AlertResponse
 
 
 class FaceEmbeddingResponse(BaseModel):
@@ -60,3 +61,8 @@ class FaceRecognitionResponse(BaseModel):
     matched_employee_id: str | None = None
     matched_employee_name: str | None = None
     face_box: FaceBoxResponse | None = None
+    alert: AlertResponse | None = None
+
+
+class FaceRecognitionStatusResponse(BaseModel):
+    enabled: bool

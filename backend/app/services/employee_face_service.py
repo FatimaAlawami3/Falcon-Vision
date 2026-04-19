@@ -6,12 +6,14 @@ from bson import ObjectId
 from fastapi import UploadFile
 import numpy as np
 
-from app.core.constants import UserRole, normalize_user_role
+from app.core.constants import RuleCategory, Severity, UserRole, VisionModule, normalize_user_role
 from app.core.exceptions import AppError, NotFoundError, PermissionDeniedError
 from app.integrations.ai.face_recognition_client import FaceRecognitionClient
 from app.integrations.storage.storage_client import StorageClient
 from app.models.employee_face_model import EmployeeFaceModel, FaceQuality
 from app.repositories.employee_face_repository import EmployeeFaceRepository
+from app.repositories.extracted_rule_repository import ExtractedRuleRepository
+from app.services.alert_service import AlertService
 from app.schemas.employee_face_schema import (
     EmployeeFaceResponse,
     EmployeeFaceUploadFailure,
@@ -20,6 +22,7 @@ from app.schemas.employee_face_schema import (
     FaceBoxResponse,
     FaceQualityResponse,
     FaceRecognitionResponse,
+    FaceRecognitionStatusResponse,
 )
 from app.utils.datetime import utc_now
 from app.utils.file_validation import (
@@ -41,12 +44,16 @@ class EmployeeFaceService:
     def __init__(
         self,
         employee_face_repository: EmployeeFaceRepository,
+        extracted_rule_repository: ExtractedRuleRepository,
+        alert_service: AlertService,
         storage_client: StorageClient,
         face_recognition_client: FaceRecognitionClient,
         *,
         max_face_image_size_mb: int,
     ) -> None:
         self.employee_face_repository = employee_face_repository
+        self.extracted_rule_repository = extracted_rule_repository
+        self.alert_service = alert_service
         self.storage_client = storage_client
         self.face_recognition_client = face_recognition_client
         self.max_face_image_size_mb = max_face_image_size_mb
@@ -138,6 +145,9 @@ class EmployeeFaceService:
         file: UploadFile,
         current_user: dict,
     ) -> FaceRecognitionResponse:
+        if not await self.is_face_recognition_enabled(current_user):
+            raise AppError("Face recognition is disabled for this organization")
+
         extracted_files = await self._extract_face_files(file)
         if len(extracted_files) != 1:
             raise AppError("Recognition expects exactly one image file")
@@ -151,9 +161,31 @@ class EmployeeFaceService:
                 threshold=self.face_recognition_client.match_threshold,
             )
 
-        gallery = await self.employee_face_repository.list_active_faces(current_user["organization_id"])
+        gallery = await self.employee_face_repository.list_active_faces(ObjectId(current_user["organization_id"]))
         if not gallery:
-            raise NotFoundError("No uploaded employee face images were found")
+            created_alert = await self.alert_service.create_alert(
+                organization_id=current_user["organization_id"],
+                title="No face gallery uploaded",
+                message="No face gallery uploaded",
+                category=RuleCategory.ACCESS_CONTROL,
+                severity=Severity.MEDIUM,
+                image_bytes=face_file["content"],
+                bbox=probe_embedding.bbox,
+            )
+            return FaceRecognitionResponse(
+                status="no_gallery",
+                authorized=False,
+                threshold=self.face_recognition_client.match_threshold,
+                face_box=FaceBoxResponse(
+                    x1=probe_embedding.bbox[0],
+                    y1=probe_embedding.bbox[1],
+                    x2=probe_embedding.bbox[2],
+                    y2=probe_embedding.bbox[3],
+                    image_width=probe_embedding.image_width,
+                    image_height=probe_embedding.image_height,
+                ),
+                alert=created_alert,
+            )
 
         probe_vector = np.asarray(probe_embedding.vector, dtype=np.float32)
         employee_gallery = await self._build_employee_gallery(gallery)
@@ -185,7 +217,7 @@ class EmployeeFaceService:
         employee_name = employee.get("full_name") if employee else None
 
         authorized = best_score >= self.face_recognition_client.match_threshold
-        return FaceRecognitionResponse(
+        response = FaceRecognitionResponse(
             status="ok",
             authorized=authorized,
             threshold=self.face_recognition_client.match_threshold,
@@ -202,6 +234,32 @@ class EmployeeFaceService:
                 image_height=probe_embedding.image_height,
             ),
         )
+        if not authorized:
+            alert_title = "Unauthorized face" if employee_name else "Unknown face"
+            created_alert = await self.alert_service.create_alert(
+                organization_id=current_user["organization_id"],
+                title=alert_title,
+                message=alert_title,
+                category=RuleCategory.ACCESS_CONTROL,
+                severity=Severity.MEDIUM,
+                image_bytes=face_file["content"],
+                bbox=probe_embedding.bbox,
+                employee_name=employee_name,
+            )
+            response.alert = created_alert
+        return response
+
+    async def get_face_recognition_status(self, current_user: dict) -> FaceRecognitionStatusResponse:
+        return FaceRecognitionStatusResponse(
+            enabled=await self.is_face_recognition_enabled(current_user)
+        )
+
+    async def is_face_recognition_enabled(self, current_user: dict) -> bool:
+        face_rules = await self.extracted_rule_repository.get_rules_by_module(
+            current_user["organization_id"],
+            VisionModule.FACE_ACCESS_CONTROL,
+        )
+        return len(face_rules) > 0
 
     def _ensure_upload_permission(self, current_user: dict) -> None:
         if normalize_user_role(current_user["role"]) not in ADMIN_UPLOAD_ROLES:

@@ -14,8 +14,8 @@ mongodb = MongoDatabase()
 
 async def connect_to_mongo() -> None:
     settings = get_settings()
-    mongodb.client = AsyncIOMotorClient(settings.mongo_uri, tlsCAFile=certifi.where())
-    mongodb.database = mongodb.client[settings.mongo_db_name]
+    mongodb.client = AsyncIOMotorClient(settings.MONGO_URI, tlsCAFile=certifi.where())
+    mongodb.database = mongodb.client[settings.MONGO_DB_NAME]
     await mongodb.client.admin.command("ping")
 
 
