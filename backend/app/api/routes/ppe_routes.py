@@ -32,9 +32,9 @@ async def check_ppe_compliance(
     """Check PPE compliance for an employee in an uploaded image.
 
     If employee_id is provided, the system will automatically determine
-    the required PPE from the employee's profile. If zone_type is provided,
-    it will get PPE requirements from extracted rules for that zone.
-    Otherwise, you can specify required_ppe manually.
+    the required PPE from the employee's profile if no extracted company rules are found.
+    Otherwise, the service uses extracted PPE rules from the company's regulation file.
+    You can also specify required_ppe manually to override.
     """
     return await ppe_service.check_ppe_compliance(
         file, employee_id, required_ppe, zone_type, current_user

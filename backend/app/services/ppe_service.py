@@ -6,6 +6,7 @@ import numpy as np
 from fastapi import UploadFile
 
 from app.core.config import get_settings
+from app.core.constants import RuleCategory, EntityStatus
 from app.core.exceptions import AppError
 from app.integrations.ai.ppe_detection_client import PPEDetector, PPEViolation
 from app.repositories.employee_repository import EmployeeRepository
@@ -24,16 +25,18 @@ class PPEService:
         ppe_detector: PPEDetector,
         employee_repository: EmployeeRepository,
         rule_repository: ExtractedRuleRepository,
+        regulation_repository=None,
         *,
         max_image_size_mb: int,
     ) -> None:
         self.ppe_detector = ppe_detector
         self.employee_repository = employee_repository
         self.rule_repository = rule_repository
+        self.regulation_repository = regulation_repository
         self.max_image_size_mb = max_image_size_mb
 
     @classmethod
-    def create(cls, employee_repository: EmployeeRepository, rule_repository: ExtractedRuleRepository) -> "PPEService":
+    def create(cls, employee_repository: EmployeeRepository, rule_repository: ExtractedRuleRepository, regulation_repository=None) -> "PPEService":
         """Factory method to create PPE service with default detector."""
         settings = get_settings()
 
@@ -48,6 +51,7 @@ class PPEService:
             ppe_detector=ppe_detector,
             employee_repository=employee_repository,
             rule_repository=rule_repository,
+            regulation_repository=regulation_repository,
             max_image_size_mb=settings.MAX_FACE_IMAGE_SIZE_MB,  # Reuse face image size limit
         )
 
@@ -143,18 +147,22 @@ class PPEService:
         organization_id = current_user["organization_id"]
         employee_name = None
         actual_required_ppe = required_ppe or []
+        employee = None
 
         if employee_id:
             employee = await self.employee_repository.get_by_id(organization_id, employee_id)
             if employee:
                 employee_name = employee.full_name
-                if not actual_required_ppe:  # Only use employee PPE if not explicitly provided
-                    actual_required_ppe = employee.ppe_requirements
 
-        # If still no required PPE, try to get from rules based on zone
-        if not actual_required_ppe and zone_type:
-            rule_based_ppe = await self._get_ppe_from_rules(organization_id, zone_type)
+        # Zone-based rules should take precedence when provided.
+        # Use company regulation rules directly for PPE requirements.
+        rule_based_ppe = await self._get_ppe_from_rules(organization_id)
+        if rule_based_ppe:
             actual_required_ppe = rule_based_ppe
+
+        # Only use employee PPE when no extracted rules exist and no explicit PPE list was provided.
+        if not actual_required_ppe and employee is not None:
+            actual_required_ppe = employee.ppe_requirements
 
         # Check compliance
         violation = self.ppe_detector.check_ppe_compliance(image, actual_required_ppe)
@@ -186,10 +194,7 @@ class PPEService:
         zone_type: str | None,
     ) -> List[str]:
         """Filter live PPE violations to only those required by extracted rules."""
-        if not zone_type:
-            return []
-
-        required_ppe = await self._get_ppe_from_rules(organization_id, zone_type)
+        required_ppe = await self._get_ppe_from_rules(organization_id)
         if not required_ppe:
             return []
 
@@ -209,10 +214,8 @@ class PPEService:
         zone_type: str | None,
     ) -> tuple[List[dict], List[str]]:
         """Return only rule-relevant live PPE detections and violations."""
-        if not zone_type:
-            return [], []
+        required_ppe = await self._get_ppe_from_rules(organization_id)
 
-        required_ppe = await self._get_ppe_from_rules(organization_id, zone_type)
         if not required_ppe:
             return [], []
 
@@ -220,7 +223,9 @@ class PPEService:
             self.ppe_detector._normalize_required_item(requirement) or requirement
             for requirement in required_ppe
         }
+
         allowed_violation_classes = set(self._get_violation_classes_for_requirements(list(normalized_required)))
+
         monitored_classes = normalized_required | allowed_violation_classes
 
         filtered_detected_items = [
@@ -228,6 +233,7 @@ class PPEService:
             for item in detected_items
             if item["class_name"] in monitored_classes
         ]
+
         filtered_violations = sorted(
             {
                 item["class_name"]
@@ -238,24 +244,43 @@ class PPEService:
 
         return filtered_detected_items, filtered_violations
 
-    async def _get_ppe_from_rules(self, organization_id: str, zone_type: str) -> List[str]:
-        """Get required PPE from extracted rules for a specific zone.
+    async def _get_ppe_from_rules(self, organization_id: str) -> List[str]:
+        """Get required PPE from the latest extracted regulation file for the organization.
 
         Args:
             organization_id: Organization ID
-            zone_type: Zone type to get PPE requirements for
 
         Returns:
-            List of required PPE items
+            List of required PPE items from the latest regulation file
         """
         try:
-            # Get active PPE rules for this organization and zone
-            rules = await self.rule_repository.get_active_rules_by_category_and_zone(
-                organization_id, "ppe", zone_type
-            )
+            # If regulation_repository is available, get rules from the latest regulation file only
+            if self.regulation_repository:
+                latest_regulation = await self.regulation_repository.get_latest_regulation(organization_id)
+
+                if latest_regulation:
+                    # Get rules only from the latest regulation file
+                    rules = await self.rule_repository.get_rules_by_regulation(latest_regulation.id)
+
+                    # Filter to only active PPE rules
+                    ppe_rules = [
+                        r for r in rules if r.category == RuleCategory.PPE and r.status == EntityStatus.ACTIVE
+                    ]
+
+                    if not ppe_rules and getattr(latest_regulation.extraction, "rules_count", 0) > 0:
+                        ppe_rules = await self.rule_repository.get_active_rules_by_category(
+                            organization_id, RuleCategory.PPE
+                        )
+                else:
+                    ppe_rules = []
+            else:
+                # Fallback: get all active PPE rules (legacy behavior)
+                ppe_rules = await self.rule_repository.get_active_rules_by_category(
+                    organization_id, RuleCategory.PPE
+                )
 
             required_ppe = []
-            for rule in rules:
+            for rule in ppe_rules:
                 # Extract PPE requirements from vision mapping
                 if rule.vision_mapping.required_classes:
                     required_ppe.extend(rule.vision_mapping.required_classes)
@@ -265,10 +290,10 @@ class PPEService:
                 normalized = self.ppe_detector._normalize_required_item(requirement)
                 normalized_requirements.append(normalized or requirement)
 
-            return list(set(normalized_requirements))  # Remove duplicates
+            final_ppe = list(set(normalized_requirements))  # Remove duplicates
+            return final_ppe
 
-        except Exception as e:
-            print(f"Error getting PPE from rules: {e}")
+        except Exception:
             return []
 
     def _get_violation_classes_for_requirements(self, required_ppe: List[str]) -> List[str]:

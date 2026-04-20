@@ -22,6 +22,7 @@ from app.api.deps import (
     get_fire_service,
     get_local_storage_client,
     get_ppe_service,
+    get_regulation_repository,
 )
 from app.core.constants import RuleCategory, Severity, normalize_user_role
 from app.core.database import get_database
@@ -104,7 +105,7 @@ async def _run_safety_detection(
     filtered_ppe_items, ppe_violations = await ppe_service.get_live_ppe_monitoring_data(
         detected_ppe_items,
         organization_id,
-        zone_type or DEFAULT_MONITORING_ZONE,
+        None,
     )
     created_alerts = []
 
@@ -196,7 +197,7 @@ async def _run_safety_detection_from_ndarray(
         fire_service=fire_service,
         alert_service=alert_service,
         current_user=current_user,
-        zone_type=zone_type,
+        zone_type=None,
     )
 
 
@@ -379,7 +380,7 @@ async def monitoring_safety_websocket(
         await websocket.close(code=1008)
         return
 
-    ppe_service = get_ppe_service(get_employee_repository(), get_extracted_rule_repository())
+    ppe_service = get_ppe_service(get_employee_repository(), get_extracted_rule_repository(), get_regulation_repository())
     fall_service = get_fall_service(get_database())
     fire_service = get_fire_service(get_database())
     alert_service = get_alert_service(get_alert_repository(), get_local_storage_client())
@@ -440,7 +441,7 @@ async def monitoring_safety_websocket(
                 fire_service=fire_service,
                 alert_service=alert_service,
                 current_user=current_user,
-                zone_type=zone_type,
+                zone_type=None,
             )
             await websocket.send_json(
                 {

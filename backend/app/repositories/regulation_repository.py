@@ -46,3 +46,22 @@ class RegulationRepository(BaseRepository):
             {"$set": update_fields},
             return_document=ReturnDocument.AFTER,
         )
+
+    async def get_latest_regulation(self, organization_id: str) -> RegulationModel | None:
+        """Get the most recently uploaded regulation file for an organization.
+
+        Args:
+            organization_id: Organization ID
+
+        Returns:
+            Latest regulation or None if no regulations exist
+        """
+        query = {
+            "organization_id": organization_id,
+            "is_deleted": {"$ne": True},
+        }
+
+        doc = await self.collection.find_one(query, sort=[("created_at", -1)])
+        if doc:
+            return RegulationModel(**doc)
+        return None

@@ -115,8 +115,9 @@ def get_employee_face_service(
 def get_ppe_service(
     employee_repository: Annotated[EmployeeRepository, Depends(get_employee_repository)],
     rule_repository: Annotated[ExtractedRuleRepository, Depends(get_extracted_rule_repository)],
+    regulation_repository: Annotated[RegulationRepository, Depends(get_regulation_repository)],
 ) -> PPEService:
-    return PPEService.create(employee_repository, rule_repository)
+    return PPEService.create(employee_repository, rule_repository, regulation_repository)
 
 
 def get_regulation_service(

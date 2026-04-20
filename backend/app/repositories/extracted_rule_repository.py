@@ -1,11 +1,13 @@
 from typing import List
 
+from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.constants import EntityStatus, RuleCategory, VisionModule
 from app.models.extracted_rule_model import ExtractedRuleModel
 from app.repositories.base_repository import BaseRepository
 from app.utils.datetime import utc_now
+from app.utils.object_id import validate_object_id
 
 
 class ExtractedRuleRepository(BaseRepository):
@@ -34,6 +36,32 @@ class ExtractedRuleRepository(BaseRepository):
             "category": category,
             "status": EntityStatus.ACTIVE,
             "applies_to.zone_types": zone_type
+        }
+
+        cursor = self.collection.find(query)
+        rules = []
+        async for doc in cursor:
+            rules.append(ExtractedRuleModel(**doc))
+
+        return rules
+
+    async def get_active_rules_by_category(
+        self, organization_id: str, category: RuleCategory
+    ) -> List[ExtractedRuleModel]:
+        """Get active rules for a specific category regardless of zone.
+
+        Args:
+            organization_id: Organization ID
+            category: Rule category (e.g., PPE)
+
+        Returns:
+            List of active rules
+        """
+        query = {
+            "organization_id": organization_id,
+            "category": category,
+            "status": EntityStatus.ACTIVE,
+            "is_deleted": {"$ne": True},
         }
 
         cursor = self.collection.find(query)
@@ -85,7 +113,7 @@ class ExtractedRuleRepository(BaseRepository):
         )
         return int(result.modified_count)
 
-    async def get_rules_by_regulation(self, regulation_id: str) -> List[ExtractedRuleModel]:
+    async def get_rules_by_regulation(self, regulation_id: str | ObjectId) -> List[ExtractedRuleModel]:
         """Get all rules extracted from a specific regulation.
 
         Args:
@@ -95,7 +123,8 @@ class ExtractedRuleRepository(BaseRepository):
             List of rules from the regulation
         """
         query = {
-            "regulation_id": regulation_id
+            "regulation_id": regulation_id if isinstance(regulation_id, ObjectId) else validate_object_id(regulation_id),
+            "is_deleted": {"$ne": True},
         }
 
         cursor = self.collection.find(query)

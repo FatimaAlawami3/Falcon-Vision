@@ -148,6 +148,7 @@ class PPEDetector:
     def check_ppe_compliance(self, image: np.ndarray, required_ppe: List[str],
                            confidence_threshold: float = 0.4) -> PPEViolation:
         """Check if an image complies with PPE requirements using CLIP mapping.
+        Only monitors and reports on required PPE items and their violations.
 
         Args:
             image: Input image as numpy array (BGR format)
@@ -155,7 +156,7 @@ class PPEDetector:
             confidence_threshold: Minimum confidence for detections
 
         Returns:
-            PPE violation assessment
+            PPE violation assessment (filtered to required items only)
         """
         detections = self.detect_ppe(image, confidence_threshold)
         detected_classes = {det.class_name for det in detections}
@@ -167,6 +168,13 @@ class PPEDetector:
         }
 
         mapped_requirements = self._map_requirements_to_model_classes(required_ppe)
+
+        # Build set of required classes (after mapping)
+        required_classes = set()
+        for required in required_ppe:
+            mapped_class = mapped_requirements.get(required) or self._normalize_required_item(required)
+            if mapped_class:
+                required_classes.add(mapped_class)
 
         missing_ppe = []
         for required in required_ppe:
@@ -188,13 +196,16 @@ class PPEDetector:
 
             missing_ppe.append(required)
 
+        # Filter detected_ppe to ONLY include required classes that were detected
+        detected_required_ppe = sorted(positive_detections & required_classes)
+
         height, width = image.shape[:2]
 
         return PPEViolation(
             employee_id=None,  # Will be set by service
             employee_name=None,  # Will be set by service
             missing_ppe=missing_ppe,
-            detected_ppe=sorted(positive_detections),
+            detected_ppe=detected_required_ppe,  # ← Only required PPE that was detected
             required_ppe=required_ppe,
             confidence=max([det.confidence for det in detections], default=0.0),
             image_width=width,

@@ -259,6 +259,7 @@ class RegulationService:
 
         # Extract text from file
         file_path = Path(regulation["file"]["storage_path"])
+
         if not file_path.exists():
             raise ValueError(f"Regulation file not found: {file_path}")
 
@@ -269,7 +270,7 @@ class RegulationService:
         saved_rules = await self._convert_extraction_to_rules(
             extracted_data, regulation_id, organization_id
         )
-
+        
         # Update regulation extraction status
         await self.regulation_repository.update_extraction_status(
             regulation_id,
@@ -299,6 +300,7 @@ class RegulationService:
 
         # Process PPE items
         ppe_list = extracted_data.get("PPE_list", [])
+
         if ppe_list:
             for ppe_item in ppe_list:
                 mapped_class = self._map_single_requirement(
@@ -306,6 +308,7 @@ class RegulationService:
                     PPE_DETECTOR_CLASSES,
                     fallback=self._fallback_ppe_mapping(ppe_item),
                 )
+
                 rule_data = {
                     "regulation_id": regulation_id,
                     "organization_id": organization_id,
