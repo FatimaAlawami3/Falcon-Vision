@@ -101,7 +101,12 @@ class PPEDetector:
         self.positive_ppe_classes = list(self.POSITIVE_TO_NEGATIVE_CLASS.keys())
 
 
-    def detect_ppe(self, image: np.ndarray, confidence_threshold: float = 0.4) -> List[PPEDetection]:
+    def detect_ppe(
+        self,
+        image: np.ndarray,
+        confidence_threshold: float = 0.4,
+        image_size: int = 416,
+    ) -> List[PPEDetection]:
         """Detect PPE items in an image.
 
         Args:
@@ -114,7 +119,7 @@ class PPEDetector:
         height, width = image.shape[:2]
 
         # Run inference
-        results = self.model(image, conf=confidence_threshold, verbose=False)
+        results = self.model(image, imgsz=image_size, conf=confidence_threshold, verbose=False)
 
         detections = []
         for result in results:

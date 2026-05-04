@@ -32,6 +32,7 @@ from app.services.fall_service import FallDetectionService
 from app.services.fire_service import FireDetectionService
 from app.services.ppe_service import PPEService
 from app.services.alert_service import AlertService
+from app.utils.datetime import utc_now
 from app.utils.object_id import validate_object_id
 
 
@@ -39,6 +40,8 @@ router = APIRouter(prefix="/api/monitoring", tags=["monitoring"])
 DEFAULT_MONITORING_ZONE = "production"
 WEBRTC_SAFETY_INTERVAL_SECONDS = 0.15
 ACTIVE_PEER_CONNECTIONS: set[object] = set()
+ALERT_WRITE_COOLDOWN_SECONDS = 8.0
+RECENT_ALERT_SIGNATURES: dict[str, float] = {}
 
 
 def _clone_upload_file(file_bytes: bytes, filename: str, content_type: str | None) -> StarletteUploadFile:
@@ -49,6 +52,43 @@ def _clone_upload_file(file_bytes: bytes, filename: str, content_type: str | Non
         size=len(file_bytes),
         headers=headers,
     )
+
+
+def _empty_ppe_result(detail: str) -> dict:
+    return {
+        "status": "unavailable",
+        "detail": detail,
+        "violations": [],
+        "detected_items": [],
+        "image_width": 0,
+        "image_height": 0,
+    }
+
+
+def _empty_fall_result(detail: str, zone_type: str | None) -> dict:
+    return {
+        "status": "unavailable",
+        "detail": detail,
+        "people_count": 0,
+        "falls_detected": 0,
+        "detections": [],
+        "fall_detection_active": False,
+        "zone_type": zone_type,
+    }
+
+
+def _empty_fire_result(detail: str, zone_type: str | None) -> dict:
+    return {
+        "alert_level": "no_alert",
+        "sensor_prediction": "unavailable",
+        "image_decision": "unavailable",
+        "image_confidence": 0.0,
+        "reason": detail,
+        "detections": [],
+        "fire_detection_active": False,
+        "zone_type": zone_type,
+        "sensor_data_used": False,
+    }
 
 
 async def _authenticate_websocket_user(token: str | None) -> dict:
@@ -69,6 +109,87 @@ async def _authenticate_websocket_user(token: str | None) -> dict:
     return user
 
 
+async def _create_alert_safely(
+    *,
+    alert_service: AlertService,
+    organization_id,
+    title: str,
+    message: str,
+    category: RuleCategory,
+    severity: Severity,
+    image_bytes: bytes,
+    bbox: list[float] | None,
+) -> None:
+    try:
+        await alert_service.create_alert(
+            organization_id=organization_id,
+            title=title,
+            message=message,
+            category=category,
+            severity=severity,
+            image_bytes=image_bytes,
+            bbox=bbox,
+        )
+    except Exception:
+        traceback.print_exc()
+
+
+def _queue_alert_once(
+    *,
+    alert_service: AlertService,
+    organization_id,
+    title: str,
+    message: str,
+    category: RuleCategory,
+    severity: Severity,
+    image_bytes: bytes,
+    bbox: list[float] | None,
+) -> dict | None:
+    if not organization_id:
+        return None
+
+    now = time.monotonic()
+    signature = f"{organization_id}:{category}:{title}:{message}"
+    last_seen = RECENT_ALERT_SIGNATURES.get(signature, 0.0)
+    if now - last_seen < ALERT_WRITE_COOLDOWN_SECONDS:
+        return None
+
+    RECENT_ALERT_SIGNATURES[signature] = now
+    detected_at = utc_now()
+    evidence_image_data_url = None
+    if bbox:
+        cropped_bytes = alert_service._crop_image_bytes(image_bytes, bbox)
+        if cropped_bytes is not None:
+            evidence_image_data_url = f"data:image/jpeg;base64,{base64.b64encode(cropped_bytes).decode('ascii')}"
+
+    asyncio.create_task(
+        _create_alert_safely(
+            alert_service=alert_service,
+            organization_id=organization_id,
+            title=title,
+            message=message,
+            category=category,
+            severity=severity,
+            image_bytes=image_bytes,
+            bbox=bbox,
+        )
+    )
+    return {
+        "id": f"live-{signature}:{int(now * 1000)}",
+        "title": title,
+        "message": message,
+        "category": str(category),
+        "severity": str(severity),
+        "status": "open",
+        "detected_at": detected_at.isoformat(),
+        "camera_name": None,
+        "zone_name": None,
+        "employee_name": None,
+        "evidence_image_path": None,
+        "evidence_image_data_url": evidence_image_data_url,
+    }
+
+
 async def _run_safety_detection(
     *,
     file_bytes: bytes,
@@ -86,27 +207,85 @@ async def _run_safety_detection(
     ppe_file = _clone_upload_file(file_bytes, filename, content_type)
     fall_file = _clone_upload_file(file_bytes, filename, content_type)
     fire_file = _clone_upload_file(file_bytes, filename, content_type)
+    effective_zone_type = zone_type or DEFAULT_MONITORING_ZONE
+    required_ppe = await ppe_service.get_live_required_ppe(organization_id) if organization_id else []
 
-    ppe_detection, fall_detection, fire_detection = await asyncio.gather(
-        ppe_service.detect_ppe(ppe_file, current_user),
-        fall_service.detect_falls(
-            fall_file,
-            zone_type=zone_type or DEFAULT_MONITORING_ZONE,
-            organization_id=organization_id,
-        ),
-        fire_service.detect_fire_image_only(
-            fire_file,
-            zone_type=zone_type or DEFAULT_MONITORING_ZONE,
-            organization_id=organization_id,
-        ),
+    safety_tasks = []
+    if required_ppe:
+        safety_tasks.append(("ppe", ppe_service.detect_ppe(ppe_file, current_user)))
+    safety_tasks.extend(
+        [
+            (
+                "fall",
+                fall_service.detect_falls(
+                    fall_file,
+                    zone_type=effective_zone_type,
+                    organization_id=organization_id,
+                ),
+            ),
+            (
+                "fire",
+                fire_service.detect_fire_image_only(
+                    fire_file,
+                    zone_type=effective_zone_type,
+                    organization_id=organization_id,
+                ),
+            ),
+        ]
     )
 
-    detected_ppe_items = [item.model_dump() for item in ppe_detection.detected_items]
-    filtered_ppe_items, ppe_violations = await ppe_service.get_live_ppe_monitoring_data(
-        detected_ppe_items,
-        organization_id,
-        None,
+    safety_results = await asyncio.gather(
+        *(task for _module, task in safety_tasks),
+        return_exceptions=True,
     )
+    results_by_module = {
+        module: result
+        for (module, _task), result in zip(safety_tasks, safety_results)
+    }
+
+    ppe_detection_result = results_by_module.get("ppe")
+    fall_detection_result = results_by_module.get("fall")
+    fire_detection_result = results_by_module.get("fire")
+
+    if not required_ppe:
+        ppe_detection = {
+            "status": "inactive",
+            "violations": [],
+            "detected_items": [],
+            "image_width": 0,
+            "image_height": 0,
+        }
+        filtered_ppe_items = []
+        ppe_violations = []
+    elif isinstance(ppe_detection_result, Exception):
+        ppe_detection = _empty_ppe_result(str(ppe_detection_result))
+        filtered_ppe_items = []
+        ppe_violations = []
+    else:
+        detected_ppe_items = [item.model_dump() for item in ppe_detection_result.detected_items]
+        filtered_ppe_items, ppe_violations = await ppe_service.get_live_ppe_monitoring_data(
+            detected_ppe_items,
+            organization_id,
+            effective_zone_type,
+            required_ppe,
+        )
+        ppe_detection = {
+            "status": "violation" if ppe_violations else "clear",
+            "violations": ppe_violations,
+            "detected_items": filtered_ppe_items,
+            "image_width": ppe_detection_result.image_width,
+            "image_height": ppe_detection_result.image_height,
+        }
+
+    if isinstance(fall_detection_result, Exception):
+        fall_detection = _empty_fall_result(str(fall_detection_result), effective_zone_type)
+    else:
+        fall_detection = fall_detection_result
+
+    if isinstance(fire_detection_result, Exception):
+        fire_detection = _empty_fire_result(str(fire_detection_result), effective_zone_type)
+    else:
+        fire_detection = fire_detection_result
     created_alerts = []
 
     for violation_label in ppe_violations:
@@ -115,7 +294,8 @@ async def _run_safety_detection(
             (item for item in filtered_ppe_items if item["class_name"] == violation_label),
             None,
         )
-        alert = await alert_service.create_alert(
+        alert = _queue_alert_once(
+            alert_service=alert_service,
             organization_id=organization_id,
             title=f"Missing PPE: {normalized_ppe}",
             message=f"Missing PPE: {normalized_ppe}",
@@ -125,49 +305,47 @@ async def _run_safety_detection(
             bbox=matching_detection["bbox"] if matching_detection else None,
         )
         if alert is not None:
-            created_alerts.append(alert.model_dump(mode="json"))
+            created_alerts.append(alert)
 
-    for fall_detection_item in fall_detection["detections"]:
-        if not fall_detection_item["is_fallen"]:
-            continue
-        alert = await alert_service.create_alert(
-            organization_id=organization_id,
-            title="Fall detected",
-            message="Fall detected",
-            category=RuleCategory.FALL,
-            severity=Severity.CRITICAL,
-            image_bytes=file_bytes,
-            bbox=fall_detection_item["bbox"],
-        )
-        if alert is not None:
-            created_alerts.append(alert.model_dump(mode="json"))
+    if fall_detection.get("fall_detection_active"):
+        for fall_detection_item in fall_detection["detections"]:
+            if not fall_detection_item["is_fallen"]:
+                continue
+            alert = _queue_alert_once(
+                alert_service=alert_service,
+                organization_id=organization_id,
+                title="Fall detected",
+                message="Fall detected",
+                category=RuleCategory.FALL,
+                severity=Severity.CRITICAL,
+                image_bytes=file_bytes,
+                bbox=fall_detection_item["bbox"],
+            )
+            if alert is not None:
+                created_alerts.append(alert)
 
-    for fire_detection_item in fire_detection["detections"]:
-        class_name = str(fire_detection_item["class"]).strip().lower()
-        if class_name not in {"fire", "smoke"}:
-            continue
-        title = "Fire detected" if class_name == "fire" else "Smoke detected"
-        alert = await alert_service.create_alert(
-            organization_id=organization_id,
-            title=title,
-            message=title,
-            category=RuleCategory.FIRE_SMOKE,
-            severity=Severity.CRITICAL,
-            image_bytes=file_bytes,
-            bbox=fire_detection_item["bbox"],
-        )
-        if alert is not None:
-            created_alerts.append(alert.model_dump(mode="json"))
+    if fire_detection.get("fire_detection_active"):
+        for fire_detection_item in fire_detection["detections"]:
+            class_name = str(fire_detection_item["class"]).strip().lower()
+            if class_name not in {"fire", "smoke"}:
+                continue
+            title = "Fire detected" if class_name == "fire" else "Smoke detected"
+            alert = _queue_alert_once(
+                alert_service=alert_service,
+                organization_id=organization_id,
+                title=title,
+                message=title,
+                category=RuleCategory.FIRE_SMOKE,
+                severity=Severity.CRITICAL,
+                image_bytes=file_bytes,
+                bbox=fire_detection_item["bbox"],
+            )
+            if alert is not None:
+                created_alerts.append(alert)
 
     return {
         "status": "success",
-        "ppe": {
-            "status": "violation" if ppe_violations else "clear",
-            "violations": ppe_violations,
-            "detected_items": filtered_ppe_items,
-            "image_width": ppe_detection.image_width,
-            "image_height": ppe_detection.image_height,
-        },
+        "ppe": ppe_detection,
         "fall": fall_detection,
         "fire": fire_detection,
         "alerts": created_alerts,
@@ -197,7 +375,7 @@ async def _run_safety_detection_from_ndarray(
         fire_service=fire_service,
         alert_service=alert_service,
         current_user=current_user,
-        zone_type=None,
+        zone_type=zone_type,
     )
 
 
@@ -388,6 +566,9 @@ async def monitoring_safety_websocket(
     try:
         while True:
             message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                return
+
             file_bytes: bytes | None = None
             zone_type = DEFAULT_MONITORING_ZONE
             frame_width: int | None = None
@@ -441,7 +622,7 @@ async def monitoring_safety_websocket(
                 fire_service=fire_service,
                 alert_service=alert_service,
                 current_user=current_user,
-                zone_type=None,
+                zone_type=zone_type,
             )
             await websocket.send_json(
                 {

@@ -1,5 +1,6 @@
 """Service for fire/smoke detection with multimodal fusion and rule-based monitoring."""
 from pathlib import Path
+from threading import Lock
 from typing import List
 
 import cv2
@@ -19,6 +20,9 @@ class FireDetectionService:
     """Service for fire/smoke detection with multimodal fusion."""
 
     PROJECT_ROOT = Path(__file__).resolve().parents[3]
+    _detector_cache: FireSmokeDetector | None = None
+    _detector_initialized = False
+    _detector_lock = Lock()
 
     def __init__(self, rule_repository: ExtractedRuleRepository):
         """Initialize fire detection service.
@@ -28,41 +32,57 @@ class FireDetectionService:
         """
         self.rule_repository = rule_repository
         self.settings = get_settings()
-        self.detector = None
-        self._init_detector()
+        self.detector = self._get_detector()
 
-    def _init_detector(self) -> None:
+    @classmethod
+    def _get_detector(cls) -> FireSmokeDetector | None:
         """Initialize fire detector with models."""
-        if not self.settings.FIRE_DETECTION_ENABLED:
-            self.detector = None
-            return
+        settings = get_settings()
+        if not settings.FIRE_DETECTION_ENABLED:
+            return None
 
-        # Model paths live in the repo root /Fire Detection directory.
-        yolo_model_path = self.PROJECT_ROOT / "Fire Detection" / "fire_smoke_model.pt"
-        sensor_model_path = self.PROJECT_ROOT / "Fire Detection" / "ml_lr_classifier.pkl"
-        scaler_path = self.PROJECT_ROOT / "Fire Detection" / "ml_scaler.pkl"
-        label_encoder_path = self.PROJECT_ROOT / "Fire Detection" / "ml_label_encoder.pkl"
+        with cls._detector_lock:
+            if cls._detector_initialized:
+                return cls._detector_cache
 
-        # Check if models exist
-        required_files = [sensor_model_path, scaler_path, label_encoder_path]
-        missing = [f for f in required_files if not f.exists()]
+            cls._detector_initialized = True
 
-        if missing:
-            print(f"Warning: Fire detection models not found: {missing}")
-            print("Fire detection service will operate in vision-only mode")
-            self.detector = None
-            return
+            # Model paths live in the repo root /Fire Detection directory.
+            yolo_model_path = cls.PROJECT_ROOT / "Fire Detection" / "fire_smoke_model.pt"
+            sensor_model_path = cls.PROJECT_ROOT / "Fire Detection" / "ml_lr_classifier.pkl"
+            scaler_path = cls._first_existing_model_path("ml_scaler.pkl", "ml_lrـscaler.pkl")
+            label_encoder_path = cls._first_existing_model_path("ml_label_encoder.pkl", "ml_lrـlabel_encoder.pkl")
 
-        try:
-            self.detector = FireSmokeDetector(
-                yolo_model_path=yolo_model_path,
-                sensor_model_path=sensor_model_path,
-                scaler_path=scaler_path,
-                label_encoder_path=label_encoder_path
-            )
-        except Exception as e:
-            print(f"Error initializing fire detector: {e}")
-            self.detector = None
+            # Check if models exist
+            required_files = [yolo_model_path, sensor_model_path, scaler_path, label_encoder_path]
+            missing = [f for f in required_files if not f.exists()]
+
+            if missing:
+                print(f"Warning: Fire detection models not found: {missing}")
+                print("Fire detection service is unavailable until the model files are present")
+                return None
+
+            try:
+                cls._detector_cache = FireSmokeDetector(
+                    yolo_model_path=yolo_model_path,
+                    sensor_model_path=sensor_model_path,
+                    scaler_path=scaler_path,
+                    label_encoder_path=label_encoder_path,
+                )
+            except Exception as e:
+                print(f"Error initializing fire detector: {e}")
+                cls._detector_cache = None
+
+            return cls._detector_cache
+
+    @classmethod
+    def _first_existing_model_path(cls, *filenames: str) -> Path:
+        model_dir = cls.PROJECT_ROOT / "Fire Detection"
+        for filename in filenames:
+            path = model_dir / filename
+            if path.exists():
+                return path
+        return model_dir / filenames[0]
 
     async def detect_fire_with_fusion(
         self,
@@ -82,6 +102,12 @@ class FireDetectionService:
         Returns:
             Dictionary with detection results and alert level
         """
+        fire_detection_active = True
+        if zone_type and organization_id:
+            fire_detection_active = await self._check_fire_detection_rule(
+                organization_id, zone_type
+            )
+
         if not self.settings.FIRE_DETECTION_ENABLED:
             return {
                 "alert_level": AlertLevel.NO_ALERT.value,
@@ -89,6 +115,19 @@ class FireDetectionService:
                 "image_decision": "disabled",
                 "image_confidence": 0.0,
                 "reason": "Fire detection is disabled by configuration.",
+                "detections": [],
+                "fire_detection_active": False,
+                "zone_type": zone_type,
+                "sensor_data_used": sensor_data is not None and len(sensor_data) > 0,
+            }
+
+        if not fire_detection_active:
+            return {
+                "alert_level": AlertLevel.NO_ALERT.value,
+                "sensor_prediction": "inactive",
+                "image_decision": "inactive",
+                "image_confidence": 0.0,
+                "reason": "Fire/smoke detection is inactive because no extracted rule applies to this zone.",
                 "detections": [],
                 "fire_detection_active": False,
                 "zone_type": zone_type,
@@ -103,7 +142,7 @@ class FireDetectionService:
                 "image_confidence": 0.0,
                 "reason": "Fire detector is unavailable because the required model files were not found.",
                 "detections": [],
-                "fire_detection_active": False,
+                "fire_detection_active": fire_detection_active,
                 "zone_type": zone_type,
                 "sensor_data_used": sensor_data is not None and len(sensor_data) > 0,
             }
@@ -120,18 +159,6 @@ class FireDetectionService:
 
         # Run multimodal detection
         result = self.detector.detect_with_fusion(image, sensor_data)
-
-        # Check rules if zone type provided
-        fire_detection_active = True
-        if zone_type and organization_id:
-            fire_detection_active = await self._check_fire_detection_rule(
-                organization_id, zone_type
-            )
-
-        # If fire detection is disabled by rules, downgrade alert
-        if not fire_detection_active:
-            result.alert_level = AlertLevel.NO_ALERT
-            result.reason += " (Fire detection disabled by rules for this zone)"
 
         # Prepare response
         return {

@@ -18,8 +18,12 @@ class ExtractedRuleRepository(BaseRepository):
     def __init__(self, db: AsyncIOMotorDatabase) -> None:
         super().__init__(db)
 
+    @staticmethod
+    def _organization_query_value(organization_id: str | ObjectId) -> ObjectId:
+        return organization_id if isinstance(organization_id, ObjectId) else validate_object_id(organization_id)
+
     async def get_active_rules_by_category_and_zone(
-        self, organization_id: str, category: RuleCategory, zone_type: str
+        self, organization_id: str | ObjectId, category: RuleCategory, zone_type: str
     ) -> List[ExtractedRuleModel]:
         """Get active rules for a specific category and zone type.
 
@@ -32,10 +36,11 @@ class ExtractedRuleRepository(BaseRepository):
             List of active rules
         """
         query = {
-            "organization_id": organization_id,
+            "organization_id": self._organization_query_value(organization_id),
             "category": category,
             "status": EntityStatus.ACTIVE,
-            "applies_to.zone_types": zone_type
+            "applies_to.zone_types": zone_type,
+            "is_deleted": {"$ne": True},
         }
 
         cursor = self.collection.find(query)
@@ -46,7 +51,7 @@ class ExtractedRuleRepository(BaseRepository):
         return rules
 
     async def get_active_rules_by_category(
-        self, organization_id: str, category: RuleCategory
+        self, organization_id: str | ObjectId, category: RuleCategory
     ) -> List[ExtractedRuleModel]:
         """Get active rules for a specific category regardless of zone.
 
@@ -58,7 +63,7 @@ class ExtractedRuleRepository(BaseRepository):
             List of active rules
         """
         query = {
-            "organization_id": organization_id,
+            "organization_id": self._organization_query_value(organization_id),
             "category": category,
             "status": EntityStatus.ACTIVE,
             "is_deleted": {"$ne": True},
@@ -71,7 +76,7 @@ class ExtractedRuleRepository(BaseRepository):
 
         return rules
 
-    async def get_rules_by_module(self, organization_id: str, module: VisionModule) -> List[ExtractedRuleModel]:
+    async def get_rules_by_module(self, organization_id: str | ObjectId, module: VisionModule) -> List[ExtractedRuleModel]:
         """Get rules that use a specific vision module.
 
         Args:
@@ -82,7 +87,7 @@ class ExtractedRuleRepository(BaseRepository):
             List of rules using the specified module
         """
         query = {
-            "organization_id": organization_id,
+            "organization_id": self._organization_query_value(organization_id),
             "vision_mapping.module": module,
             "status": EntityStatus.ACTIVE,
             "is_deleted": {"$ne": True},

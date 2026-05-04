@@ -38,7 +38,12 @@ class FallDetector:
         self.model_path = Path(pose_model_path)
         self.classifier_path = Path(classifier_path)
 
-    def detect_falls(self, image: np.ndarray, confidence_threshold: float = 0.4) -> List[PersonDetection]:
+    def detect_falls(
+        self,
+        image: np.ndarray,
+        confidence_threshold: float = 0.4,
+        image_size: int = 416,
+    ) -> List[PersonDetection]:
         """Detect falls in an image using pose estimation and ML classifier.
 
         Args:
@@ -51,6 +56,7 @@ class FallDetector:
         # Run pose estimation
         results = self.pose_model.predict(
             source=image,
+            imgsz=image_size,
             conf=confidence_threshold,
             verbose=False
         )

@@ -20,6 +20,7 @@ import {
   type FireDetectionResponse,
   getFaceRecognitionStatus,
   getMonitoringSafetyWebSocketUrl,
+  listAlerts,
   resolveStorageUrl,
   recognizeEmployeeFace,
 } from '../../lib/api';
@@ -27,14 +28,14 @@ import {
 const TRACKING_MIN_INTERVAL_MS = 16;
 const TRACKING_SMOOTHING_FACTOR = 0.65;
 const TRACKING_BOX_MAX_AGE_MS = 120;
-const OVERLAY_TRACKING_SMOOTHING_FACTOR = 0.42;
-const TRACKED_OVERLAY_MAX_AGE_MS = 1600;
+const OVERLAY_TRACKING_SMOOTHING_FACTOR = 0.7;
+const TRACKED_OVERLAY_MAX_AGE_MS = 600;
 const OVERLAY_MATCH_DISTANCE_THRESHOLD = 0.35;
 const DEFAULT_MONITORING_ZONE = 'production';
-const MAX_INFERENCE_FRAME_WIDTH = 960;
-const INFERENCE_JPEG_QUALITY = 0.8;
-const FRAME_LOOP_INTERVAL_MS = 60;
-const FACE_DETECTION_INTERVAL_MS = 1200;
+const MAX_INFERENCE_FRAME_WIDTH = 640;
+const INFERENCE_JPEG_QUALITY = 0.65;
+const FRAME_LOOP_INTERVAL_MS = 40;
+const FACE_DETECTION_INTERVAL_MS = 140;
 
 type AlertRow = {
   id: string;
@@ -572,6 +573,55 @@ export function MonitoringPage() {
 
   const hasEvidencePreview = (alert: AlertRow) => Boolean(alert.imageUrl);
 
+  const mapSavedAlertRow = (alert: AlertResponse): AlertRow => {
+    const detectedAt = new Date(alert.detected_at);
+    return {
+      id: alert.id,
+      date: detectedAt.toLocaleDateString('en-CA'),
+      time: detectedAt.toLocaleTimeString('en-US', {
+        hour: '2-digit',
+        minute: '2-digit',
+      }),
+      image: alert.employee_name || alert.category,
+      imageUrl: alert.evidence_image_data_url || resolveStorageUrl(alert.evidence_image_path),
+      typeLabel: getAlertTypeLabel(alert),
+      detail: alert.message,
+    };
+  };
+
+  const mergeSavedAlerts = (savedAlerts: AlertResponse[]) => {
+    if (!savedAlerts.length) {
+      return;
+    }
+
+    setAlerts((current) => {
+      const next = [...current];
+
+      savedAlerts.forEach((alert) => {
+        if (next.some((item) => item.id === alert.id)) {
+          return;
+        }
+
+        const savedRow = mapSavedAlertRow(alert);
+        const liveIndex = next.findIndex(
+          (item) =>
+            item.id.startsWith('live-') &&
+            item.typeLabel === savedRow.typeLabel &&
+            item.detail === savedRow.detail,
+        );
+
+        if (liveIndex >= 0) {
+          next[liveIndex] = savedRow;
+          return;
+        }
+
+        next.unshift(savedRow);
+      });
+
+      return next;
+    });
+  };
+
   const syncAlertState = (
     key: 'face' | 'ppe' | 'fall' | 'fire',
     signature: string,
@@ -647,6 +697,43 @@ export function MonitoringPage() {
       faceDetectorRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    if (!isStreaming) {
+      return;
+    }
+
+    const token = getAccessToken();
+    if (!token) {
+      return;
+    }
+
+    let isCancelled = false;
+
+    const refreshSavedAlerts = async () => {
+      try {
+        const response = await listAlerts(token, 20);
+        if (isCancelled) {
+          return;
+        }
+
+        mergeSavedAlerts(response.items.filter((alert) => Boolean(alert.evidence_image_path)));
+      } catch (error) {
+        if (isTokenError(error)) {
+          return;
+        }
+        console.error('Could not refresh saved alert evidence:', error);
+      }
+    };
+
+    void refreshSavedAlerts();
+    const intervalId = window.setInterval(refreshSavedAlerts, 2500);
+
+    return () => {
+      isCancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [isStreaming]);
 
   useEffect(() => {
     if (!isStreaming) {
@@ -964,21 +1051,12 @@ export function MonitoringPage() {
           const existingIds = new Set(current.map((alert) => alert.id));
           const mapped = safetyResult.alerts
             .filter((alert) => !existingIds.has(alert.id))
-            .map((alert) => {
-              const detectedAt = new Date(alert.detected_at);
-              return {
-                id: alert.id,
-                date: detectedAt.toLocaleDateString('en-CA'),
-                time: detectedAt.toLocaleTimeString('en-US', {
-                  hour: '2-digit',
-                  minute: '2-digit',
-                }),
-                image: alert.employee_name || alert.category,
-                imageUrl: resolveStorageUrl(alert.evidence_image_path),
-                typeLabel: getAlertTypeLabel(alert),
-                detail: alert.message,
-              };
-            });
+            .map((alert) => ({
+              ...mapSavedAlertRow(alert),
+              imageUrl:
+                alert.evidence_image_data_url ||
+                resolveStorageUrl(alert.evidence_image_path),
+            }));
 
           return [...mapped, ...current];
         });
