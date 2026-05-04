@@ -1,4 +1,5 @@
 from typing import Annotated
+from functools import lru_cache
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
@@ -79,6 +80,7 @@ def get_employee_service(
     return EmployeeService(employee_repository)
 
 
+@lru_cache(maxsize=1)
 def get_face_recognition_client() -> FaceRecognitionClient:
     return FaceRecognitionClient()
 

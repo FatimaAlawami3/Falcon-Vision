@@ -278,6 +278,7 @@ export interface AlertResponse {
   zone_name?: string | null;
   employee_name?: string | null;
   evidence_image_path?: string | null;
+  evidence_image_data_url?: string | null;
 }
 
 export interface AlertListResponse {

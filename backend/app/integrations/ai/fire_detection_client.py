@@ -58,7 +58,8 @@ class FireSmokeDetector:
         sensor_model_path: str | Path,
         scaler_path: str | Path,
         label_encoder_path: str | Path,
-        conf_threshold: float = 0.4
+        conf_threshold: float = 0.4,
+        image_size: int = 416,
     ):
         """Initialize fire/smoke detector with YOLO and ML models.
 
@@ -74,6 +75,7 @@ class FireSmokeDetector:
         self.scaler = joblib.load(str(scaler_path))
         self.label_encoder = joblib.load(str(label_encoder_path))
         self.conf_threshold = conf_threshold
+        self.image_size = image_size
 
         self.class_names = {0: "fire", 1: "smoke"}
 
@@ -89,7 +91,7 @@ class FireSmokeDetector:
         # Run YOLO inference
         results = self.yolo_model.predict(
             source=image,
-            imgsz=640,
+            imgsz=self.image_size,
             conf=self.conf_threshold,
             verbose=False
         )

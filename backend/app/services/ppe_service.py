@@ -1,4 +1,5 @@
 from pathlib import Path
+from threading import Lock
 from typing import List
 
 import cv2
@@ -19,6 +20,8 @@ class PPEService:
     """Service for PPE detection and compliance checking with rule-based monitoring."""
 
     PROJECT_ROOT = Path(__file__).resolve().parents[3]
+    _detector_cache: PPEDetector | None = None
+    _detector_lock = Lock()
 
     def __init__(
         self,
@@ -39,21 +42,28 @@ class PPEService:
     def create(cls, employee_repository: EmployeeRepository, rule_repository: ExtractedRuleRepository, regulation_repository=None) -> "PPEService":
         """Factory method to create PPE service with default detector."""
         settings = get_settings()
-
-        # PPE model lives in the repo root /PPE directory.
-        model_path = cls.PROJECT_ROOT / "PPE" / "PPE_model.pt"
-
-        if not model_path.exists():
-            raise AppError(f"PPE model not found at {model_path}")
-
-        ppe_detector = PPEDetector(model_path, use_clip=True)  # Enable CLIP mapping
         return cls(
-            ppe_detector=ppe_detector,
+            ppe_detector=cls._get_detector(),
             employee_repository=employee_repository,
             rule_repository=rule_repository,
             regulation_repository=regulation_repository,
             max_image_size_mb=settings.MAX_FACE_IMAGE_SIZE_MB,  # Reuse face image size limit
         )
+
+    @classmethod
+    def _get_detector(cls) -> PPEDetector:
+        with cls._detector_lock:
+            if cls._detector_cache is not None:
+                return cls._detector_cache
+
+            # PPE model lives in the repo root /PPE directory.
+            model_path = cls.PROJECT_ROOT / "PPE" / "PPE_model.pt"
+
+            if not model_path.exists():
+                raise AppError(f"PPE model not found at {model_path}")
+
+            cls._detector_cache = PPEDetector(model_path, use_clip=True)
+            return cls._detector_cache
 
     async def detect_ppe(self, file: UploadFile, current_user: dict) -> PPEDetectionResponse:
         """Detect PPE items in an uploaded image.
@@ -212,9 +222,10 @@ class PPEService:
         detected_items: List[dict],
         organization_id,
         zone_type: str | None,
+        required_ppe: List[str] | None = None,
     ) -> tuple[List[dict], List[str]]:
         """Return only rule-relevant live PPE detections and violations."""
-        required_ppe = await self._get_ppe_from_rules(organization_id)
+        required_ppe = required_ppe if required_ppe is not None else await self._get_ppe_from_rules(organization_id)
 
         if not required_ppe:
             return [], []
@@ -243,6 +254,9 @@ class PPEService:
         )
 
         return filtered_detected_items, filtered_violations
+
+    async def get_live_required_ppe(self, organization_id) -> List[str]:
+        return await self._get_ppe_from_rules(organization_id)
 
     async def _get_ppe_from_rules(self, organization_id: str) -> List[str]:
         """Get required PPE from the latest extracted regulation file for the organization.

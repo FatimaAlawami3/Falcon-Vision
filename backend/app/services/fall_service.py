@@ -1,6 +1,7 @@
 """Service for fall detection with rule-based monitoring."""
 from io import BytesIO
 from pathlib import Path
+from threading import Lock
 from typing import List
 
 import cv2
@@ -16,6 +17,8 @@ class FallDetectionService:
     """Service for fall detection with rule-based monitoring."""
 
     PROJECT_ROOT = Path(__file__).resolve().parents[3]
+    _detector_cache: FallDetector | None = None
+    _detector_lock = Lock()
 
     def __init__(self, rule_repository: ExtractedRuleRepository):
         """Initialize fall detection service.
@@ -24,25 +27,30 @@ class FallDetectionService:
             rule_repository: Repository for accessing extracted rules
         """
         self.rule_repository = rule_repository
-        self.detector = None
-        self._init_detector()
+        self.detector = self._get_detector()
 
-    def _init_detector(self) -> None:
+    @classmethod
+    def _get_detector(cls) -> FallDetector:
         """Initialize fall detector with models."""
-        # Model paths live in the repo root /Fall model directory.
-        pose_model_path = self.PROJECT_ROOT / "Fall model" / "fall_model.pt"
-        classifier_path = self.PROJECT_ROOT / "Fall model" / "fall_classifier_RF.pkl"
+        with cls._detector_lock:
+            if cls._detector_cache is not None:
+                return cls._detector_cache
 
-        if not pose_model_path.exists() or not classifier_path.exists():
-            raise FileNotFoundError(
-                f"Fall detection models not found. "
-                f"Expected: {pose_model_path} and {classifier_path}"
+            # Model paths live in the repo root /Fall model directory.
+            pose_model_path = cls.PROJECT_ROOT / "Fall model" / "fall_model.pt"
+            classifier_path = cls.PROJECT_ROOT / "Fall model" / "fall_classifier_RF.pkl"
+
+            if not pose_model_path.exists() or not classifier_path.exists():
+                raise FileNotFoundError(
+                    f"Fall detection models not found. "
+                    f"Expected: {pose_model_path} and {classifier_path}"
+                )
+
+            cls._detector_cache = FallDetector(
+                pose_model_path=pose_model_path,
+                classifier_path=classifier_path,
             )
-
-        self.detector = FallDetector(
-            pose_model_path=pose_model_path,
-            classifier_path=classifier_path
-        )
+            return cls._detector_cache
 
     async def detect_falls(
         self,
@@ -63,6 +71,12 @@ class FallDetectionService:
         if not self.detector:
             raise RuntimeError("Fall detector not initialized")
 
+        fall_detection_active = True
+        if zone_type and organization_id:
+            fall_detection_active = await self._check_fall_detection_rule(
+                organization_id, zone_type
+            )
+
         # Read image
         image_data = await file.read()
         image = cv2.imdecode(
@@ -73,15 +87,18 @@ class FallDetectionService:
         if image is None:
             raise ValueError("Invalid image format")
 
+        if not fall_detection_active:
+            return {
+                "status": "inactive",
+                "people_count": 0,
+                "falls_detected": 0,
+                "detections": [],
+                "fall_detection_active": False,
+                "zone_type": zone_type,
+            }
+
         # Detect falls
         detections = self.detector.detect_falls(image)
-
-        # Check rules if zone type provided
-        fall_detection_active = True
-        if zone_type and organization_id:
-            fall_detection_active = await self._check_fall_detection_rule(
-                organization_id, zone_type
-            )
 
         # Prepare response
         falls_detected = [d for d in detections if d.is_fallen]

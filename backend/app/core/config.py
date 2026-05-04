@@ -47,6 +47,8 @@ class Settings(BaseSettings):
                 return False
             if normalized in {"debug", "development", "dev"}:
                 return True
+            if normalized in {"warn", "warning", "info", "error", "off"}:
+                return False
         return value
 
     @field_validator("CORS_ORIGINS", mode="before")
