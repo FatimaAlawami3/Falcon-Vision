@@ -152,6 +152,7 @@ class EmployeeService:
             id=str(employee_doc["_id"]),
             organization_id=str(employee_doc["organization_id"]),
             employee_number=employee_doc["employee_number"],
+            linked_user_id=str(employee_doc["linked_user_id"]) if employee_doc.get("linked_user_id") else None,
             full_name=employee_doc["full_name"],
             department=employee_doc.get("department"),
             job_title=employee_doc.get("job_title"),

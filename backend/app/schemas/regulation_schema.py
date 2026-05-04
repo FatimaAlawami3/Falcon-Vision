@@ -12,6 +12,15 @@ class RegulationFileResponse(BaseModel):
     sha256: str
 
 
+class RegulationExtractionStateResponse(BaseModel):
+    status: str
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    model_name: str | None = None
+    error_message: str | None = None
+    rules_count: int
+
+
 class RegulationResponse(BaseModel):
     id: str
     organization_id: str
@@ -22,6 +31,7 @@ class RegulationResponse(BaseModel):
     version: int
     uploaded_by: str
     file: RegulationFileResponse
+    extraction: RegulationExtractionStateResponse
     created_at: datetime
     updated_at: datetime
 
@@ -49,6 +59,12 @@ class RegulationExtractionSummary(BaseModel):
 
 class RegulationUploadResponse(BaseModel):
     regulation: RegulationResponse
+    extracted_rules: list[ExtractedRuleResponse]
+    summary: RegulationExtractionSummary
+
+
+class RegulationCurrentResponse(BaseModel):
+    regulation: RegulationResponse | None = None
     extracted_rules: list[ExtractedRuleResponse]
     summary: RegulationExtractionSummary
 

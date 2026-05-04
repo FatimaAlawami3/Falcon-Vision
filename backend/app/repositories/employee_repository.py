@@ -30,6 +30,19 @@ class EmployeeRepository(BaseRepository):
             }
         )
 
+    async def find_by_linked_user_id(
+        self,
+        organization_id: ObjectId,
+        linked_user_id: ObjectId,
+    ) -> dict[str, Any] | None:
+        return await self.collection.find_one(
+            {
+                "organization_id": organization_id,
+                "linked_user_id": linked_user_id,
+                "is_deleted": {"$ne": True},
+            }
+        )
+
     async def list_by_organization(self, organization_id: ObjectId) -> list[dict[str, Any]]:
         cursor = self.collection.find(
             {

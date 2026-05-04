@@ -1,8 +1,11 @@
 """LLM-based rule extraction from documents using the same model as the notebook."""
 import json
-import re
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Any, Callable, Dict, List
+
+
+class ExtractionCancelledError(Exception):
+    """Raised when a regulation extraction request is cancelled."""
 
 
 class SafetyRulesExtractor:
@@ -85,7 +88,12 @@ class SafetyRulesExtractor:
 
         return sorted(list(normalized))
 
-    def extract_from_text(self, text: str) -> Dict[str, Any]:
+    def extract_from_text(
+        self,
+        text: str,
+        *,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> Dict[str, Any]:
         """Extract safety rules from text using LLM.
 
         Args:
@@ -103,6 +111,9 @@ class SafetyRulesExtractor:
         chunks = self.chunk_text(text)
 
         for chunk in chunks:
+            if should_cancel and should_cancel():
+                raise ExtractionCancelledError("Extraction stopped by admin.")
+
             prompt = f"""Analyze the safety document text below and extract specific safety regulations into JSON format.
 
     TASK 1: PPE Extraction
@@ -151,6 +162,8 @@ class SafetyRulesExtractor:
                         all_rules[key]["active"] = "Yes"
                         all_rules[key]["reason"] = data[key].get("reason", "")
 
+            except ExtractionCancelledError:
+                raise
             except Exception as e:
                 print(f"Error processing chunk: {e}")
                 continue
@@ -161,7 +174,12 @@ class SafetyRulesExtractor:
             "Heat_list": all_rules["Heat_list"]
         }
 
-    def extract_from_pdf(self, pdf_path: Path) -> Dict[str, Any]:
+    def extract_from_pdf(
+        self,
+        pdf_path: Path,
+        *,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> Dict[str, Any]:
         """Extract rules from a PDF document using Docling.
 
         Args:
@@ -181,9 +199,14 @@ class SafetyRulesExtractor:
             result = converter.convert(str(pdf_path))
             full_markdown_text = result.document.export_to_markdown()
 
-            # Extract rules from markdown text
-            return self.extract_from_text(full_markdown_text)
+            if should_cancel and should_cancel():
+                raise ExtractionCancelledError("Extraction stopped by admin.")
 
+            # Extract rules from markdown text
+            return self.extract_from_text(full_markdown_text, should_cancel=should_cancel)
+
+        except ExtractionCancelledError:
+            raise
         except Exception as e:
             print(f"Error processing PDF: {e}")
             return {
@@ -192,7 +215,12 @@ class SafetyRulesExtractor:
                 "Heat_list": {"active": "No", "reason": ""}
             }
 
-    def extract_from_file(self, file_path: Path) -> Dict[str, Any]:
+    def extract_from_file(
+        self,
+        file_path: Path,
+        *,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> Dict[str, Any]:
         """Extract rules from any supported file format.
 
         Args:
@@ -204,7 +232,7 @@ class SafetyRulesExtractor:
         file_path = Path(file_path)
 
         if file_path.suffix.lower() == '.pdf':
-            return self.extract_from_pdf(file_path)
+            return self.extract_from_pdf(file_path, should_cancel=should_cancel)
 
         # For other formats, try Docling conversion
         try:
@@ -216,7 +244,11 @@ class SafetyRulesExtractor:
             converter = DocumentConverter()
             result = converter.convert(str(file_path))
             full_markdown_text = result.document.export_to_markdown()
-            return self.extract_from_text(full_markdown_text)
+            if should_cancel and should_cancel():
+                raise ExtractionCancelledError("Extraction stopped by admin.")
+            return self.extract_from_text(full_markdown_text, should_cancel=should_cancel)
+        except ExtractionCancelledError:
+            raise
         except Exception as e:
             print(f"Error processing file: {e}")
             return {

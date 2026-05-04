@@ -11,6 +11,7 @@ import { AdminHomePage } from './pages/admin/AdminHomePage';
 import { UploadRegulationPage } from './pages/admin/UploadRegulationPage';
 import { AdminSettingsPage } from './pages/admin/AdminSettingsPage';
 import { AdminProfilePage } from './pages/admin/AdminProfilePage';
+import { EmployeeDirectoryPage } from './pages/admin/EmployeeDirectoryPage';
 import { UploadEmployeeFacesPage } from './pages/admin/UploadEmployeeFacesPage';
 import { MonitorAccessPermissionPage } from './pages/admin/MonitorAccessPermissionPage';
 import { AdminAlertsHistoryPage } from './pages/admin/AdminAlertsHistoryPage';
@@ -40,7 +41,9 @@ export default function App() {
           <Route path="/admin/monitoring" element={<MonitoringPage />} />
           <Route path="/admin/settings" element={<AdminSettingsPage />} />
           <Route path="/admin/profile" element={<AdminProfilePage />} />
+          <Route path="/admin/employees" element={<EmployeeDirectoryPage />} />
           <Route path="/admin/upload-faces" element={<UploadEmployeeFacesPage />} />
+          <Route path="/admin/supervisors" element={<MonitorAccessPermissionPage />} />
           <Route path="/admin/monitor-access" element={<MonitorAccessPermissionPage />} />
           <Route path="/admin/alerts-history" element={<AdminAlertsHistoryPage />} />
         </Route>

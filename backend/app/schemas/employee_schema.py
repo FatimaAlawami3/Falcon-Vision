@@ -37,6 +37,7 @@ class EmployeeResponse(BaseModel):
     id: str
     organization_id: str
     employee_number: str
+    linked_user_id: str | None = None
     full_name: str
     department: str | None = None
     job_title: str | None = None

@@ -1,7 +1,7 @@
 from pydantic import BaseModel, EmailStr, Field
 
 from app.core.constants import EmploymentType, EntityStatus
-from app.models.base import TenantModel
+from app.models.base import PyObjectId, TenantModel
 
 
 class EmployeeContact(BaseModel):
@@ -17,6 +17,7 @@ class EmployeeSafetyProfile(BaseModel):
 
 class EmployeeModel(TenantModel):
     employee_number: str
+    linked_user_id: PyObjectId | None = None
     full_name: str
     department: str | None = None
     job_title: str | None = None

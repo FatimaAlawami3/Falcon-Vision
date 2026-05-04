@@ -17,14 +17,23 @@ function resolveApiBaseUrl() {
 const API_BASE_URL = resolveApiBaseUrl();
 
 interface RequestOptions {
-  method?: 'GET' | 'POST' | 'PATCH';
+  method?: 'GET' | 'POST' | 'PATCH' | 'DELETE';
   token?: string;
   body?: BodyInit | unknown;
+  signal?: AbortSignal;
 }
 
 export interface LoginRequest {
   email: string;
   password: string;
+}
+
+export interface UpdateMyProfileRequest {
+  full_name?: string;
+  email?: string;
+  password?: string;
+  phone?: string;
+  job_title?: string;
 }
 
 export interface TokenResponse {
@@ -58,6 +67,17 @@ export interface CreateUserRequest {
   email: string;
   password: string;
   role: UserRole;
+  employee_id?: string;
+  phone?: string;
+  job_title?: string;
+}
+
+export interface UpdateUserRequest {
+  full_name?: string;
+  email?: string;
+  password?: string;
+  role?: UserRole;
+  employee_id?: string;
   phone?: string;
   job_title?: string;
 }
@@ -69,16 +89,40 @@ export interface UserResponse {
   email: string;
   role: UserRole;
   status: string;
+  employee_id?: string | null;
+  last_login_at?: string | null;
   phone?: string | null;
   job_title?: string | null;
   created_at: string;
   updated_at: string;
 }
 
+export interface UserListResponse {
+  items: UserResponse[];
+  total: number;
+}
+
+export interface EmployeeCreateRequest {
+  employee_number: string;
+  full_name: string;
+  department?: string;
+  job_title?: string;
+  employment_type?: string;
+  status?: string;
+  phone?: string;
+  email?: string;
+  requires_ppe?: boolean;
+  ppe_requirements?: string[];
+  training_certifications?: string[];
+}
+
+export interface EmployeeUpdateRequest extends Partial<EmployeeCreateRequest> {}
+
 export interface EmployeeResponse {
   id: string;
   organization_id: string;
   employee_number: string;
+  linked_user_id?: string | null;
   full_name: string;
   department?: string | null;
   job_title?: string | null;
@@ -273,6 +317,14 @@ export interface RegulationResponse {
   version: number;
   uploaded_by: string;
   file: RegulationFileResponse;
+  extraction: {
+    status: string;
+    started_at?: string | null;
+    completed_at?: string | null;
+    model_name?: string | null;
+    error_message?: string | null;
+    rules_count: number;
+  };
   created_at: string;
   updated_at: string;
 }
@@ -295,10 +347,17 @@ export interface RegulationExtractionSummary {
   ppe_items: string[];
   fall_detection_active: boolean;
   fire_smoke_detection_active: boolean;
+  face_recognition_enabled: boolean;
 }
 
 export interface RegulationUploadResponse {
   regulation: RegulationResponse;
+  extracted_rules: ExtractedRuleResponse[];
+  summary: RegulationExtractionSummary;
+}
+
+export interface RegulationCurrentResponse {
+  regulation: RegulationResponse | null;
   extracted_rules: ExtractedRuleResponse[];
   summary: RegulationExtractionSummary;
 }
@@ -311,6 +370,7 @@ async function apiRequest<T>(path: string, options: RequestOptions = {}) {
   const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData;
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method: options.method ?? 'GET',
+    signal: options.signal,
     headers: {
       ...(options.token ? { Authorization: `Bearer ${options.token}` } : {}),
       ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
@@ -357,6 +417,14 @@ export function getMe(token: string) {
   });
 }
 
+export function updateMyProfile(body: UpdateMyProfileRequest, token: string) {
+  return apiRequest<AuthUser>('/api/auth/me', {
+    method: 'PATCH',
+    token,
+    body,
+  });
+}
+
 export function createUser(body: CreateUserRequest, token: string) {
   return apiRequest<UserResponse>('/api/users', {
     method: 'POST',
@@ -365,8 +433,60 @@ export function createUser(body: CreateUserRequest, token: string) {
   });
 }
 
+export function listUsers(token: string) {
+  return apiRequest<UserListResponse>('/api/users', {
+    token,
+  });
+}
+
+export function updateUser(userId: string, body: UpdateUserRequest, token: string) {
+  return apiRequest<UserResponse>(`/api/users/${userId}`, {
+    method: 'PATCH',
+    token,
+    body,
+  });
+}
+
+export function updateUserStatus(userId: string, status: string, token: string) {
+  return apiRequest<UserResponse>(`/api/users/${userId}/status`, {
+    method: 'PATCH',
+    token,
+    body: { status },
+  });
+}
+
+export async function deleteUser(userId: string, token: string) {
+  await apiRequest<null>(`/api/users/${userId}`, {
+    method: 'DELETE',
+    token,
+  });
+}
+
+export function createEmployee(body: EmployeeCreateRequest, token: string) {
+  return apiRequest<EmployeeResponse>('/api/employees', {
+    method: 'POST',
+    token,
+    body,
+  });
+}
+
 export function listEmployees(token: string) {
   return apiRequest<EmployeeListResponse>('/api/employees', {
+    token,
+  });
+}
+
+export function updateEmployee(employeeId: string, body: EmployeeUpdateRequest, token: string) {
+  return apiRequest<EmployeeResponse>(`/api/employees/${employeeId}`, {
+    method: 'PATCH',
+    token,
+    body,
+  });
+}
+
+export async function deleteEmployee(employeeId: string, token: string) {
+  await apiRequest<null>(`/api/employees/${employeeId}`, {
+    method: 'DELETE',
     token,
   });
 }
@@ -402,6 +522,41 @@ export function uploadRegulation(file: File, token: string, title?: string, desc
     method: 'POST',
     token,
     body: formData,
+  });
+}
+
+export function getCurrentRegulation(token: string) {
+  return apiRequest<RegulationCurrentResponse>('/api/regulations/current', {
+    token,
+  });
+}
+
+export function extractRegulation(regulationId: string, token: string) {
+  return apiRequest<RegulationCurrentResponse>(`/api/regulations/${regulationId}/extract`, {
+    method: 'POST',
+    token,
+  });
+}
+
+export function extractRegulationWithSignal(regulationId: string, token: string, signal: AbortSignal) {
+  return apiRequest<RegulationCurrentResponse>(`/api/regulations/${regulationId}/extract`, {
+    method: 'POST',
+    token,
+    signal,
+  });
+}
+
+export function cancelRegulationExtraction(regulationId: string, token: string) {
+  return apiRequest<RegulationCurrentResponse>(`/api/regulations/${regulationId}/cancel-extraction`, {
+    method: 'POST',
+    token,
+  });
+}
+
+export async function deleteRegulation(regulationId: string, token: string) {
+  await apiRequest<null>(`/api/regulations/${regulationId}`, {
+    method: 'DELETE',
+    token,
   });
 }
 

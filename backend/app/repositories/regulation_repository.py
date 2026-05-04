@@ -33,7 +33,7 @@ class RegulationRepository(BaseRepository):
         if status == ExtractionStatus.PROCESSING:
             update_fields["extraction.started_at"] = now
             update_fields["extraction.completed_at"] = None
-        elif status in {ExtractionStatus.COMPLETED, ExtractionStatus.FAILED}:
+        elif status in {ExtractionStatus.COMPLETED, ExtractionStatus.FAILED, ExtractionStatus.CANCELLED}:
             update_fields["extraction.completed_at"] = now
 
         if rules_count is not None:
@@ -47,7 +47,7 @@ class RegulationRepository(BaseRepository):
             return_document=ReturnDocument.AFTER,
         )
 
-    async def get_latest_regulation(self, organization_id: str) -> RegulationModel | None:
+    async def get_latest_regulation(self, organization_id: str | ObjectId) -> RegulationModel | None:
         """Get the most recently uploaded regulation file for an organization.
 
         Args:
@@ -57,11 +57,26 @@ class RegulationRepository(BaseRepository):
             Latest regulation or None if no regulations exist
         """
         query = {
-            "organization_id": organization_id,
+            "organization_id": organization_id if isinstance(organization_id, ObjectId) else ObjectId(organization_id),
             "is_deleted": {"$ne": True},
         }
 
-        doc = await self.collection.find_one(query, sort=[("created_at", -1)])
+        doc = await self.collection.find_one(query, sort=[("updated_at", -1), ("created_at", -1)])
         if doc:
             return RegulationModel(**doc)
         return None
+
+    async def update_regulation(
+        self,
+        regulation_id: str | ObjectId,
+        update_fields: dict,
+    ) -> dict | None:
+        regulation_object_id = regulation_id if isinstance(regulation_id, ObjectId) else ObjectId(regulation_id)
+        return await self.collection.find_one_and_update(
+            {
+                "_id": regulation_object_id,
+                "is_deleted": {"$ne": True},
+            },
+            {"$set": {**update_fields, "updated_at": utc_now()}},
+            return_document=ReturnDocument.AFTER,
+        )

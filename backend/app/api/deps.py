@@ -68,8 +68,9 @@ def get_auth_service(
 
 def get_user_service(
     user_repository: Annotated[UserRepository, Depends(get_user_repository)],
+    employee_repository: Annotated[EmployeeRepository, Depends(get_employee_repository)],
 ) -> UserService:
-    return UserService(user_repository)
+    return UserService(user_repository, employee_repository)
 
 
 def get_employee_service(

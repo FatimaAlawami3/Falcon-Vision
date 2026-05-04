@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom';
-import { User, Upload, Shield, LogOut } from 'lucide-react';
+import { User, Upload, Shield, LogOut, Users } from 'lucide-react';
 import { toast } from 'sonner';
 import { Navigation } from '../../components/Navigation';
 import { Footer } from '../../components/Footer';
@@ -10,8 +10,9 @@ export function AdminSettingsPage() {
   
   const menuItems = [
     { icon: User, label: 'Profile', path: '/admin/profile' },
+    { icon: Users, label: 'Manage Employees', path: '/admin/employees' },
     { icon: Upload, label: 'Upload Employee Faces', path: '/admin/upload-faces' },
-    { icon: Shield, label: 'Monitor Access Permission', path: '/admin/monitor-access' },
+    { icon: Shield, label: 'Supervisor Access', path: '/admin/supervisors' },
     { icon: LogOut, label: 'Log out', path: '/', isLogout: true }
   ];
   

@@ -133,3 +133,36 @@ class ExtractedRuleRepository(BaseRepository):
             rules.append(ExtractedRuleModel(**doc))
 
         return rules
+
+    async def soft_delete_by_regulation(self, regulation_id: str | ObjectId, *, updated_by) -> int:
+        regulation_object_id = regulation_id if isinstance(regulation_id, ObjectId) else validate_object_id(regulation_id)
+        result = await self.collection.update_many(
+            {
+                "regulation_id": regulation_object_id,
+                "is_deleted": {"$ne": True},
+            },
+            {
+                "$set": {
+                    "is_deleted": True,
+                    "updated_at": utc_now(),
+                    "updated_by": updated_by,
+                }
+            },
+        )
+        return int(result.modified_count)
+
+    async def soft_delete_by_organization(self, organization_id: str | ObjectId, *, updated_by) -> int:
+        result = await self.collection.update_many(
+            {
+                "organization_id": organization_id if isinstance(organization_id, ObjectId) else validate_object_id(organization_id),
+                "is_deleted": {"$ne": True},
+            },
+            {
+                "$set": {
+                    "is_deleted": True,
+                    "updated_at": utc_now(),
+                    "updated_by": updated_by,
+                }
+            },
+        )
+        return int(result.modified_count)

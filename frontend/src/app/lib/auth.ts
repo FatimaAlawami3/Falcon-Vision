@@ -9,6 +9,8 @@ export interface AuthUser {
   email: string;
   role: UserRole;
   status: string;
+  phone?: string | null;
+  job_title?: string | null;
 }
 
 const ACCESS_TOKEN_KEY = 'falcon_vision_access_token';

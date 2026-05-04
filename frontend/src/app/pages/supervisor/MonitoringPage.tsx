@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import { Navigation } from '../../components/Navigation';
 import { Footer } from '../../components/Footer';
@@ -7,7 +7,6 @@ import {
   Play,
   Save,
   Square,
-  Users,
   X,
 } from 'lucide-react';
 import { WarningModal } from '../../components/WarningModal';
@@ -24,7 +23,6 @@ import {
   resolveStorageUrl,
   recognizeEmployeeFace,
 } from '../../lib/api';
-import liveFeedImage from '../../../assets/images/live-feed.png';
 
 const TRACKING_MIN_INTERVAL_MS = 16;
 const TRACKING_SMOOTHING_FACTOR = 0.65;
@@ -44,8 +42,11 @@ type AlertRow = {
   time: string;
   image: string;
   imageUrl?: string | null;
-  violation: string;
+  typeLabel: string;
+  detail: string;
 };
+
+type AlertGroup = 'critical' | 'compliance' | 'other';
 
 type DetectionOverlay = {
   id: string;
@@ -436,10 +437,58 @@ function isFaceRecognitionDisabledError(error: unknown) {
   return error instanceof Error && /face recognition is disabled for this organization/i.test(error.message);
 }
 
+function getAlertTypeLabel(alert: Pick<AlertResponse, 'category' | 'message'>) {
+  const message = alert.message.toLowerCase();
+
+  if (alert.category === 'ppe') {
+    return 'PPE Violation';
+  }
+
+  if (alert.category === 'fire_smoke') {
+    if (message.includes('smoke')) {
+      return 'Smoke Alert';
+    }
+    if (message.includes('fire')) {
+      return 'Fire Alert';
+    }
+    return 'Fire / Smoke Alert';
+  }
+
+  if (alert.category === 'fall') {
+    return 'Fall Alert';
+  }
+
+  if (alert.category === 'access_control') {
+    if (message.includes('no face gallery')) {
+      return 'Face Setup Alert';
+    }
+    return 'Access Alert';
+  }
+
+  return 'Alert';
+}
+
+function getAlertGroup(alert: Pick<AlertRow, 'typeLabel'>): AlertGroup {
+  if (
+    alert.typeLabel === 'Fire Alert' ||
+    alert.typeLabel === 'Smoke Alert' ||
+    alert.typeLabel === 'Fire / Smoke Alert' ||
+    alert.typeLabel === 'Fall Alert'
+  ) {
+    return 'critical';
+  }
+
+  if (alert.typeLabel === 'PPE Violation') {
+    return 'compliance';
+  }
+
+  return 'other';
+}
+
 export function MonitoringPage() {
   const location = useLocation();
   const isAdminView = location.pathname.startsWith('/admin');
-  const [headCount, setHeadCount] = useState(12);
+  const [headCount, setHeadCount] = useState<number | null>(null);
   const [modalState, setModalState] = useState({ isOpen: false, title: '', message: '' });
   const [exitConfirm, setExitConfirm] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -503,10 +552,10 @@ export function MonitoringPage() {
     fire: '',
   });
 
-  const addAlert = (image: string, violation: string, imageUrl?: string | null) => {
+  const addAlert = (image: string, typeLabel: string, detail: string, imageUrl?: string | null) => {
     const now = new Date();
     const nextAlert: AlertRow = {
-      id: `${now.getTime()}-${violation}-${image}`,
+      id: `${now.getTime()}-${typeLabel}-${image}`,
       date: now.toLocaleDateString('en-CA'),
       time: now.toLocaleTimeString('en-US', {
         hour: '2-digit',
@@ -514,17 +563,20 @@ export function MonitoringPage() {
       }),
       image,
       imageUrl,
-      violation,
+      typeLabel,
+      detail,
     };
 
     setAlerts((current) => [nextAlert, ...current]);
   };
 
+  const hasEvidencePreview = (alert: AlertRow) => Boolean(alert.imageUrl);
+
   const syncAlertState = (
     key: 'face' | 'ppe' | 'fall' | 'fire',
     signature: string,
     image: string,
-    violation: string,
+    detail: string,
   ) => {
     if (!signature) {
       lastAlertSignatureRef.current[key] = '';
@@ -536,7 +588,7 @@ export function MonitoringPage() {
     }
 
     lastAlertSignatureRef.current[key] = signature;
-    addAlert(image, violation);
+    addAlert(image, key === 'ppe' ? 'PPE Violation' : 'Alert', detail);
   };
 
   const updateRecognizingState = () => {
@@ -574,6 +626,7 @@ export function MonitoringPage() {
     setPpeResult(null);
     setFallResult(null);
     setFireResult(null);
+    setHeadCount(null);
     setDetectionOverlays([]);
     detectorInFlightRef.current = {
       face: false,
@@ -922,7 +975,8 @@ export function MonitoringPage() {
                 }),
                 image: alert.employee_name || alert.category,
                 imageUrl: resolveStorageUrl(alert.evidence_image_path),
-                violation: alert.message,
+                typeLabel: getAlertTypeLabel(alert),
+                detail: alert.message,
               };
             });
 
@@ -930,9 +984,7 @@ export function MonitoringPage() {
         });
       }
 
-      if (safetyResult.fall.people_count > 0) {
-        setHeadCount(safetyResult.fall.people_count);
-      }
+      setHeadCount(safetyResult.fall.people_count);
     };
 
     const runFaceRecognition = async (capturedFrame: CapturedVideoFrame) => {
@@ -970,7 +1022,8 @@ export function MonitoringPage() {
               }),
               image: result.alert.employee_name || result.alert.category,
               imageUrl: resolveStorageUrl(result.alert.evidence_image_path),
-              violation: result.alert.message,
+              typeLabel: getAlertTypeLabel(result.alert),
+              detail: result.alert.message,
             };
 
             return [nextAlert, ...current];
@@ -994,7 +1047,8 @@ export function MonitoringPage() {
                 }),
                 image: result.alert.employee_name || result.alert.category,
                 imageUrl: resolveStorageUrl(result.alert.evidence_image_path),
-                violation: result.alert.message,
+                typeLabel: getAlertTypeLabel(result.alert),
+                detail: result.alert.message,
               };
 
               return [nextAlert, ...current];
@@ -1237,7 +1291,7 @@ export function MonitoringPage() {
       setTrackedFaceBox(null);
       setIsLocalTrackingEnabled(false);
       setIsFaceRecognitionActive(faceRecognitionEnabled);
-      setHeadCount(12);
+      setHeadCount(null);
       setAlerts([]);
       setDetectionOverlays([]);
       lastAlertSignatureRef.current = {
@@ -1303,6 +1357,87 @@ export function MonitoringPage() {
     isStreaming && trackedFaceBox && !hasRecognitionFaceOverlay
       ? getLocalFaceBoxStyle(trackedFaceBox, videoRef.current)
       : null;
+  const criticalAlerts = useMemo(
+    () => alerts.filter((alert) => getAlertGroup(alert) === 'critical'),
+    [alerts],
+  );
+  const ppeAlerts = useMemo(
+    () => alerts.filter((alert) => getAlertGroup(alert) === 'compliance'),
+    [alerts],
+  );
+  const otherAlerts = useMemo(
+    () => alerts.filter((alert) => getAlertGroup(alert) === 'other'),
+    [alerts],
+  );
+
+  const renderAlertSection = (
+    title: string,
+    sectionAlerts: AlertRow[],
+    emptyText: string,
+    tone: 'critical' | 'compliance' | 'other',
+  ) => {
+    const toneClasses =
+      tone === 'critical'
+        ? {
+            title: 'text-[#9e2a2b]',
+            badge: 'bg-red-100 text-red-700',
+            border: 'border-red-200',
+          }
+        : tone === 'compliance'
+          ? {
+              title: 'text-[#b45309]',
+              badge: 'bg-orange-100 text-orange-700',
+              border: 'border-orange-200',
+            }
+          : {
+              title: 'text-[#475569]',
+              badge: 'bg-slate-100 text-slate-700',
+              border: 'border-slate-200',
+            };
+
+    return (
+      <div className={`rounded-2xl border p-4 ${toneClasses.border}`}>
+        <h3 className={`font-serif text-xl mb-4 ${toneClasses.title}`}>{title}</h3>
+        {sectionAlerts.length > 0 ? (
+          <div className="space-y-3">
+            {sectionAlerts.map((alert, index) => (
+              <div
+                key={alert.id || `${alert.date}-${alert.time}-${alert.typeLabel}-${index}`}
+                className="rounded-2xl border border-[#e5dcc9] bg-[#f9f6f0] p-3"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-sm text-[#6b5d4f]">
+                      {alert.date} at {alert.time}
+                    </p>
+                    <span className={`mt-2 inline-block px-3 py-1 rounded-full text-sm ${toneClasses.badge}`}>
+                      {alert.typeLabel}
+                    </span>
+                    <p className="mt-2 text-sm text-[#4a3c2a]">{alert.detail}</p>
+                  </div>
+                  <div className="shrink-0">
+                    {hasEvidencePreview(alert) ? (
+                      <div className="w-16 h-16 rounded-lg overflow-hidden border-2 border-[#d4cbb7]">
+                        <img
+                          src={alert.imageUrl}
+                          alt="Detected event"
+                          className="w-full h-full object-cover"
+                        />
+                      </div>
+                    ) : (
+                      <span className="text-xs text-[#8b7355]">No image</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-sm text-[#6b5d4f]">{emptyText}</p>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div className="min-h-screen flex flex-col bg-[#f5f3ed]">
@@ -1350,14 +1485,6 @@ export function MonitoringPage() {
                     }`}
                   />
 
-                  {(!isStreaming || !hasLiveVideo) && (
-                    <img
-                      src={liveFeedImage}
-                      alt="Live camera placeholder"
-                      className="absolute inset-0 w-full h-full object-contain opacity-75"
-                    />
-                  )}
-
                   <div className="absolute top-4 left-4 bg-red-600 px-3 py-1 rounded flex items-center gap-2">
                     <div className="w-2 h-2 bg-white rounded-full animate-pulse"></div>
                     <span className="text-white text-sm font-semibold">{isStreaming ? 'LIVE' : 'OFFLINE'}</span>
@@ -1368,7 +1495,7 @@ export function MonitoringPage() {
                       <div className="text-center text-white max-w-sm">
                         <Camera className="w-12 h-12 mx-auto mb-3" />
                         <p className="text-lg font-medium mb-2">
-                          {isStreaming ? 'Connecting to camera...' : 'Live monitoring is ready'}
+                          {isStreaming ? 'Connecting to camera...' : 'Camera is ready'}
                         </p>
                         <p className="text-sm text-white/85">
                           {isStreaming
@@ -1427,12 +1554,10 @@ export function MonitoringPage() {
                 </div>
               </div>
 
+              {headCount !== null && (
               <div className="bg-white rounded-3xl shadow-xl p-6 border border-[#d4cbb7]">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
-                    <div className="w-12 h-12 bg-[#ff8c42]/10 rounded-full flex items-center justify-center">
-                      <Users className="w-6 h-6 text-[#ff8c42]" />
-                    </div>
                     <div>
                       <p className="text-[#6b5d4f]">Head Count</p>
                       <p className="font-serif text-3xl text-[#4a3c2a]">{headCount}</p>
@@ -1457,58 +1582,37 @@ export function MonitoringPage() {
                   </div>
                 </div>
               </div>
+              )}
             </div>
 
-            <div className="bg-white rounded-3xl shadow-xl p-6 border border-[#d4cbb7]">
-              <h2 className="font-serif text-2xl text-[#4a3c2a] mb-6">Real-Time Alerts</h2>
-              <div className="overflow-auto max-h-[600px]">
-                <table className="w-full">
-                  <thead className="border-b-2 border-[#d4cbb7] sticky top-0 bg-white">
-                    <tr>
-                      <th className="text-left py-3 px-2 text-[#6b5d4f]">Date</th>
-                      <th className="text-left py-3 px-2 text-[#6b5d4f]">Time</th>
-                      <th className="text-left py-3 px-2 text-[#6b5d4f]">Detected Image</th>
-                      <th className="text-left py-3 px-2 text-[#6b5d4f]">Violation</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {alerts.length > 0 ? (
-                      alerts.map((alert, index) => (
-                        <tr key={alert.id || `${alert.date}-${alert.time}-${alert.violation}-${index}`} className="border-b border-[#d4cbb7]/50">
-                          <td className="py-3 px-2 text-[#4a3c2a] text-sm">{alert.date}</td>
-                          <td className="py-3 px-2 text-[#6b5d4f] text-sm">{alert.time}</td>
-                          <td className="py-3 px-2">
-                            {alert.imageUrl ? (
-                              <div className="w-16 h-16 rounded-lg overflow-hidden border-2 border-red-500">
-                                <img
-                                  src={alert.imageUrl}
-                                  alt="Detected event"
-                                  className="w-full h-full object-cover"
-                                />
-                              </div>
-                            ) : (
-                              <div className="w-12 h-12 bg-[#ff8c42]/20 rounded-lg flex items-center justify-center text-xs text-[#ff8c42] text-center px-2">
-                                {alert.image}
-                              </div>
-                            )}
-                          </td>
-                          <td className="py-3 px-2">
-                            <span className="px-3 py-1 bg-red-100 text-red-700 rounded-full text-sm">
-                              {alert.violation}
-                            </span>
-                          </td>
-                        </tr>
-                      ))
-                    ) : (
-                      <tr>
-                        <td colSpan={4} className="py-8 px-2 text-center text-[#6b5d4f] text-sm">
-                          Start the camera to begin live PPE, fall, fire/smoke, and face recognition monitoring.
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
+            <div className="bg-white rounded-3xl shadow-xl p-6 border border-[#d4cbb7] space-y-4">
+              <h2 className="font-serif text-2xl text-[#4a3c2a]">Real-Time Monitoring Feed</h2>
+              {alerts.length === 0 ? (
+                <div className="rounded-2xl border border-[#d4cbb7] bg-[#f9f6f0] p-6 text-center text-[#6b5d4f] text-sm">
+                  Start the camera to begin live PPE, fall, fire/smoke, and face recognition monitoring.
+                </div>
+              ) : (
+                <>
+                  {renderAlertSection(
+                    'Critical Alerts',
+                    criticalAlerts,
+                    'No fire, smoke, or fall alerts have been detected yet.',
+                    'critical',
+                  )}
+                  {renderAlertSection(
+                    'PPE Violations',
+                    ppeAlerts,
+                    'No PPE violations have been detected yet.',
+                    'compliance',
+                  )}
+                  {renderAlertSection(
+                    'Other Alerts',
+                    otherAlerts,
+                    'No access or setup alerts have been detected yet.',
+                    'other',
+                  )}
+                </>
+              )}
             </div>
           </div>
         </div>

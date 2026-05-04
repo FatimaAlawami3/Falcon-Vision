@@ -10,6 +10,7 @@ class UserCreateRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8, max_length=72)
     role: UserRole = UserRole.SUPERVISOR
+    employee_id: str | None = Field(default=None, min_length=1, max_length=50)
     phone: str | None = Field(default=None, max_length=30)
     job_title: str | None = Field(default=None, max_length=80)
 
@@ -19,6 +20,7 @@ class UserUpdateRequest(BaseModel):
     email: EmailStr | None = None
     password: str | None = Field(default=None, min_length=8, max_length=72)
     role: UserRole | None = None
+    employee_id: str | None = Field(default=None, min_length=1, max_length=50)
     phone: str | None = Field(default=None, max_length=30)
     job_title: str | None = Field(default=None, max_length=80)
 
@@ -34,6 +36,8 @@ class UserResponse(BaseModel):
     email: EmailStr
     role: UserRole
     status: UserStatus
+    employee_id: str | None = None
+    last_login_at: datetime | None = None
     phone: str | None = None
     job_title: str | None = None
     created_at: datetime

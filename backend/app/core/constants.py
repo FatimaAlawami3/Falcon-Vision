@@ -49,8 +49,10 @@ class ExtractionStatus(StrEnum):
     NOT_STARTED = "not_started"
     PENDING = "pending"
     PROCESSING = "processing"
+    CANCELLING = "cancelling"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class RuleCategory(StrEnum):
