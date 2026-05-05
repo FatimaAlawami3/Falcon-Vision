@@ -31,11 +31,7 @@ export default function App() {
         <Route path="/forgot-password" element={<ForgotPasswordPage />} />
         <Route path="/help" element={<HelpPage />} />
 
-        <Route
-          element={
-            <ProtectedRoute allowedRoles={['admin']} />
-          }
-        >
+        <Route element={<ProtectedRoute allowedRoles={['admin']} />}>
           <Route path="/admin" element={<AdminHomePage />} />
           <Route path="/admin/upload-regulation" element={<UploadRegulationPage />} />
           <Route path="/admin/monitoring" element={<MonitoringPage />} />
@@ -46,6 +42,9 @@ export default function App() {
           <Route path="/admin/supervisors" element={<MonitorAccessPermissionPage />} />
           <Route path="/admin/monitor-access" element={<MonitorAccessPermissionPage />} />
           <Route path="/admin/alerts-history" element={<AdminAlertsHistoryPage />} />
+        </Route>
+
+        <Route element={<ProtectedRoute allowedRoles={['admin']} validateSession={false} />}>
           <Route path="/admin/help" element={<HelpPage />} />
         </Route>
 
@@ -55,6 +54,9 @@ export default function App() {
           <Route path="/supervisor/alerts-history" element={<SupervisorAlertsHistoryPage />} />
           <Route path="/supervisor/settings" element={<SupervisorSettingsPage />} />
           <Route path="/supervisor/profile" element={<SupervisorProfilePage />} />
+        </Route>
+
+        <Route element={<ProtectedRoute allowedRoles={['supervisor']} validateSession={false} />}>
           <Route path="/supervisor/help" element={<HelpPage />} />
         </Route>
 

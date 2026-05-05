@@ -14,6 +14,7 @@ import {
 
 interface ProtectedRouteProps {
   allowedRoles?: UserRole[];
+  validateSession?: boolean;
 }
 
 interface SessionState {
@@ -21,14 +22,30 @@ interface SessionState {
   user: AuthUser | null;
 }
 
-export function ProtectedRoute({ allowedRoles }: ProtectedRouteProps) {
+export function ProtectedRoute({ allowedRoles, validateSession = true }: ProtectedRouteProps) {
   const location = useLocation();
-  const [sessionState, setSessionState] = useState<SessionState>({
-    status: 'loading',
-    user: getAuthUser(),
+  const [sessionState, setSessionState] = useState<SessionState>(() => {
+    const token = getAccessToken();
+    const user = getAuthUser();
+
+    return {
+      status: validateSession ? 'loading' : token && user ? 'ready' : 'unauthenticated',
+      user,
+    };
   });
 
   useEffect(() => {
+    if (!validateSession) {
+      const token = getAccessToken();
+      const user = getAuthUser();
+
+      setSessionState({
+        status: token && user ? 'ready' : 'unauthenticated',
+        user,
+      });
+      return;
+    }
+
     let ignore = false;
     const token = getAccessToken();
 
@@ -58,7 +75,7 @@ export function ProtectedRoute({ allowedRoles }: ProtectedRouteProps) {
     return () => {
       ignore = true;
     };
-  }, [location.pathname]);
+  }, [location.pathname, validateSession]);
 
   if (sessionState.status === 'loading') {
     return (
