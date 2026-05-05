@@ -493,7 +493,7 @@ export function UploadRegulationPage() {
                   </div>
                 )}
 
-                {savedRegulations.length > 1 && (
+                {savedRegulations.length > 0 && (
                   <div className="mt-6 rounded-2xl border border-[#eedfcd] bg-[#fff8f2] p-4 text-left">
                     <p className="text-sm text-[#8b7355]">Saved regulations</p>
                     <div className="mt-3 space-y-3">
