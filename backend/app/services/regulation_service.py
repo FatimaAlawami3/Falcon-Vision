@@ -96,17 +96,12 @@ class RegulationService:
         """Factory method to create regulation service."""
         settings = get_settings()
 
-        # Initialize safety rules extractor if HF token is available
-        extractor = None
-        if settings.HF_TOKEN:
-            extractor = SafetyRulesExtractor(settings.HF_TOKEN)
-
         return cls(
             regulation_repository=regulation_repository,
             rule_repository=rule_repository,
             storage_client=storage_client,
             alert_repository=alert_repository,
-            safety_extractor=extractor,
+            safety_extractor=SafetyRulesExtractor(settings.HF_TOKEN),
             clip_mapping_client_factory=cls._build_clip_mapping_client,
         )
 

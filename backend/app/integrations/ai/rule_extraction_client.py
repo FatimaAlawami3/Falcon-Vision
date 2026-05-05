@@ -1,6 +1,7 @@
 """LLM-based rule extraction from documents using the same model as the notebook."""
 import json
 import logging
+import re
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any, Callable, Dict, List
@@ -16,13 +17,55 @@ class SafetyRulesExtractor:
     """Extracts safety rules (PPE, Fall, Heat) from documents using LLM."""
 
     MIN_EXTRACTED_TEXT_CHARS = 200
+    PPE_KEYWORDS = {
+        "coverall": ["coverall", "coveralls", "protective clothing"],
+        "ear protectors": ["ear protector", "ear protectors", "ear plug", "ear plugs", "earplug", "earplugs", "ear muff", "ear muffs", "hearing protection"],
+        "face shield": ["face shield", "face shields"],
+        "gloves": ["glove", "gloves", "hand protection"],
+        "helmet": ["helmet", "helmets", "hard hat", "hard hats", "head protection"],
+        "mask": ["mask", "masks", "respirator", "respirators", "dust mask", "face mask"],
+        "safety glasses": ["safety glasses", "safety goggles", "goggles", "eye protection", "protective eyewear"],
+        "safety harness": ["safety harness", "safety harnesses", "fall arrest harness", "body harness"],
+        "safety shoes": ["safety shoes", "safety shoe", "safety boots", "safety boot", "steel toe", "protective footwear"],
+        "safety vest": ["safety vest", "safety vests", "high visibility vest", "hi-vis vest", "reflective vest"],
+    }
+    FALL_KEYWORDS = [
+        "fall detection",
+        "fall protection",
+        "fall hazard",
+        "working at height",
+        "work at height",
+        "scaffold",
+        "scaffolding",
+        "ladder",
+        "elevated platform",
+        "fall arrest",
+    ]
+    FIRE_HEAT_KEYWORDS = [
+        "fire detection",
+        "smoke detection",
+        "fire alarm",
+        "smoke alarm",
+        "fire hazard",
+        "smoke",
+        "flame",
+        "heat",
+        "hot work",
+        "spark",
+    ]
 
-    def __init__(self, HF_TOKEN: str):
+    def __init__(self, HF_TOKEN: str | None = None):
         """Initialize the extractor with Hugging Face token.
 
         Args:
             HF_TOKEN: Hugging Face API token for accessing OpenAI-compatible API
         """
+        self.client = None
+        self.model = "local-keyword-fallback"
+
+        if not HF_TOKEN:
+            return
+
         try:
             from openai import OpenAI
         except ImportError as exc:
@@ -74,6 +117,21 @@ class SafetyRulesExtractor:
 
             # Step A: Normalize to lowercase
             item = item.lower().strip()
+            exact_ppe_terms = {
+                "coverall",
+                "ear protectors",
+                "face shield",
+                "gloves",
+                "helmet",
+                "mask",
+                "safety glasses",
+                "safety harness",
+                "safety shoes",
+                "safety vest",
+            }
+            if item in exact_ppe_terms:
+                normalized.add(item)
+                continue
 
             # Step B: Simple singularization (remove common plural endings)
             if item.endswith('ies'):
@@ -87,12 +145,61 @@ class SafetyRulesExtractor:
 
             # Step C: Trim whitespace
             item = item.strip()
+            item = {
+                "ear protector": "ear protectors",
+                "glove": "gloves",
+                "safety glass": "safety glasses",
+                "safety shoe": "safety shoes",
+                "safety sho": "safety shoes",
+            }.get(item, item)
 
             # Skip empty strings
             if item:
                 normalized.add(item)
 
         return sorted(list(normalized))
+
+    @staticmethod
+    def _contains_phrase(text: str, phrase: str) -> bool:
+        return re.search(rf"(?<![a-z0-9]){re.escape(phrase)}(?![a-z0-9])", text) is not None
+
+    @staticmethod
+    def _reason_for_keyword(text: str, keyword: str) -> str:
+        match = re.search(rf"[^.\n]*{re.escape(keyword)}[^.\n]*", text, flags=re.IGNORECASE)
+        if not match:
+            return keyword
+        reason = " ".join(match.group(0).split())
+        return reason[:300] or keyword
+
+    def extract_locally_from_text(self, text: str) -> Dict[str, Any]:
+        """Extract common safety rules without an external AI provider."""
+        lowered_text = text.lower()
+        ppe_items = [
+            item
+            for item, aliases in self.PPE_KEYWORDS.items()
+            if any(self._contains_phrase(lowered_text, alias) for alias in aliases)
+        ]
+
+        fall_match = next(
+            (keyword for keyword in self.FALL_KEYWORDS if self._contains_phrase(lowered_text, keyword)),
+            None,
+        )
+        fire_match = next(
+            (keyword for keyword in self.FIRE_HEAT_KEYWORDS if self._contains_phrase(lowered_text, keyword)),
+            None,
+        )
+
+        return {
+            "PPE_list": self.normalize_ppe_items(ppe_items),
+            "Fall_list": {
+                "active": "Yes" if fall_match else "No",
+                "reason": self._reason_for_keyword(text, fall_match) if fall_match else "",
+            },
+            "Heat_list": {
+                "active": "Yes" if fire_match else "No",
+                "reason": self._reason_for_keyword(text, fire_match) if fire_match else "",
+            },
+        }
 
     def extract_from_text(
         self,
@@ -113,6 +220,10 @@ class SafetyRulesExtractor:
             "Fall_list": {"active": "No", "reason": ""},
             "Heat_list": {"active": "No", "reason": ""}
         }
+        fallback_rules = self.extract_locally_from_text(text)
+
+        if self.client is None:
+            return fallback_rules
 
         chunks = self.chunk_text(text)
 
@@ -171,8 +282,17 @@ class SafetyRulesExtractor:
             except ExtractionCancelledError:
                 raise
             except Exception as e:
-                print(f"Error processing chunk: {e}")
+                logger.warning("AI rule extraction failed for a text chunk: %s", e)
+                error_text = str(e).lower()
+                if "402" in error_text or "depleted" in error_text or "credits" in error_text:
+                    logger.warning("Falling back to local rule extraction because the AI provider is unavailable.")
+                    break
                 continue
+
+        all_rules["PPE_list"].update(fallback_rules["PPE_list"])
+        for key in ["Fall_list", "Heat_list"]:
+            if all_rules[key]["active"] != "Yes" and fallback_rules[key]["active"] == "Yes":
+                all_rules[key] = fallback_rules[key]
 
         return {
             "PPE_list": self.normalize_ppe_items(list(all_rules["PPE_list"])),
