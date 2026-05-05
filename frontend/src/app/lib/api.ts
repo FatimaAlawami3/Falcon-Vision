@@ -614,6 +614,12 @@ export function getCurrentRegulation(token: string) {
   });
 }
 
+export function listRegulations(token: string) {
+  return apiRequest<RegulationResponse[]>('/api/regulations', {
+    token,
+  });
+}
+
 export function extractRegulation(regulationId: string, token: string) {
   return apiRequest<RegulationCurrentResponse>(`/api/regulations/${regulationId}/extract`, {
     method: 'POST',

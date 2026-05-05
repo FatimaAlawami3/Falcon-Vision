@@ -8,6 +8,7 @@ from app.schemas.regulation_schema import (
     FaceRecognitionSettingRequest,
     FaceRecognitionSettingResponse,
     RegulationCurrentResponse,
+    RegulationResponse,
     RegulationUploadResponse,
 )
 from app.services.regulation_service import RegulationService
@@ -46,6 +47,14 @@ async def get_current_regulation(
     current_user: Annotated[dict, Depends(get_current_user)],
 ) -> RegulationCurrentResponse:
     return await regulation_service.get_current_regulation(current_user)
+
+
+@router.get("", response_model=list[RegulationResponse])
+async def list_regulations(
+    regulation_service: Annotated[RegulationService, Depends(get_regulation_service)],
+    current_user: Annotated[dict, Depends(get_current_user)],
+) -> list[RegulationResponse]:
+    return await regulation_service.list_regulations(current_user)
 
 
 @router.post("/{regulation_id}/extract", response_model=RegulationCurrentResponse)

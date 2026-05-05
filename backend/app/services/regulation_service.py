@@ -205,6 +205,14 @@ class RegulationService:
         current_regulation = await self._reconcile_stale_extraction_state(current_regulation)
         return await self._build_regulation_payload(current_regulation)
 
+    async def list_regulations(self, current_user: dict) -> list[RegulationResponse]:
+        self._ensure_admin(current_user)
+        regulations = await self.regulation_repository.list_regulations(current_user["organization_id"])
+        return [
+            self._regulation_response(regulation.model_dump(by_alias=True))
+            for regulation in regulations
+        ]
+
     async def extract_regulation(self, regulation_id: str, current_user: dict) -> RegulationCurrentResponse:
         self._ensure_admin(current_user)
 

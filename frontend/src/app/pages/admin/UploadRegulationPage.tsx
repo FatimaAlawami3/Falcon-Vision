@@ -12,6 +12,7 @@ import {
   downloadRegulation,
   extractRegulation,
   getCurrentRegulation,
+  listRegulations,
   type RegulationResponse,
   type RegulationCurrentResponse,
   type RegulationUploadResponse,
@@ -21,6 +22,23 @@ import {
 
 const MAX_REGULATION_PDF_SIZE_MB = 25;
 const MAX_REGULATION_PDF_SIZE_BYTES = MAX_REGULATION_PDF_SIZE_MB * 1024 * 1024;
+
+const mergeRegulationLists = (
+  regulations: RegulationResponse[] | undefined,
+  currentRegulation: RegulationResponse | null | undefined,
+) => {
+  const byId = new Map<string, RegulationResponse>();
+
+  for (const regulation of regulations ?? []) {
+    byId.set(regulation.id, regulation);
+  }
+
+  if (currentRegulation && !byId.has(currentRegulation.id)) {
+    byId.set(currentRegulation.id, currentRegulation);
+  }
+
+  return Array.from(byId.values());
+};
 
 export function UploadRegulationPage() {
   const [file, setFile] = useState<File | null>(null);
@@ -66,12 +84,12 @@ export function UploadRegulationPage() {
       return;
     }
 
-      const normalized: RegulationCurrentResponse = {
-        regulation: response.regulation,
-        regulations: response.regulations,
-        extracted_rules: response.extracted_rules,
-        summary: response.summary,
-      };
+    const normalized: RegulationCurrentResponse = {
+      regulation: response.regulation,
+      regulations: mergeRegulationLists(response.regulations, response.regulation),
+      extracted_rules: response.extracted_rules,
+      summary: response.summary,
+    };
 
     setCurrentRegulation(normalized);
     setFaceRecognitionEnabled(normalized.summary.face_recognition_enabled);
@@ -89,7 +107,11 @@ export function UploadRegulationPage() {
     }
     try {
       const response = await getCurrentRegulation(token);
-      applyCurrentRegulation(response);
+      const savedRegulations = await listRegulations(token).catch(() => response.regulations ?? []);
+      applyCurrentRegulation({
+        ...response,
+        regulations: mergeRegulationLists(savedRegulations, response.regulation),
+      });
     } catch (error) {
       if (isTokenError(error)) {
         handleTokenExpiry();
