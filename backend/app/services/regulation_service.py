@@ -150,6 +150,7 @@ class RegulationService:
         organization_id = current_user["organization_id"]
         current_regulation = await self.regulation_repository.get_current_regulation(organization_id)
         latest_uploaded_regulation = await self.regulation_repository.get_latest_regulation(organization_id)
+        existing_regulations = await self.regulation_repository.list_regulations(organization_id)
 
         if current_regulation is not None and self._is_running_extraction_status(current_regulation.extraction.status):
             raise AppError("Stop the current extraction before uploading a new PDF.")
@@ -190,7 +191,27 @@ class RegulationService:
             updated_by=current_user["_id"],
         )
 
-        return await self._build_regulation_payload(saved_regulation)
+        payload = await self._build_regulation_payload(saved_regulation)
+        merged_regulations = {regulation.id: regulation for regulation in payload.regulations}
+
+        for existing_regulation in existing_regulations:
+            existing_data = existing_regulation.model_dump(by_alias=True)
+            existing_data["status"] = RegulationStatus.SUPERSEDED
+            existing_response = self._regulation_response(existing_data)
+            merged_regulations.setdefault(existing_response.id, existing_response)
+
+        return RegulationCurrentResponse(
+            regulation=payload.regulation,
+            regulations=sorted(
+                merged_regulations.values(),
+                key=lambda regulation_response: (
+                    regulation_response.status != RegulationStatus.ACTIVE,
+                    -regulation_response.version,
+                ),
+            ),
+            extracted_rules=payload.extracted_rules,
+            summary=payload.summary,
+        )
 
     async def get_current_regulation(self, current_user: dict) -> RegulationCurrentResponse:
         self._ensure_admin(current_user)
