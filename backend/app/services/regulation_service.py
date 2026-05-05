@@ -1,20 +1,22 @@
 import asyncio
+import logging
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from threading import Event
-from typing import List
+from typing import Callable, List
 
 from bson import ObjectId
 from fastapi import UploadFile
 
 from app.core.config import get_settings
-from app.core.constants import ExtractionStatus, RegulationStatus, RuleCategory, Severity, UserRole, VisionModule, normalize_user_role
+from app.core.constants import EntityStatus, ExtractionStatus, RegulationStatus, RuleCategory, Severity, UserRole, VisionModule, normalize_user_role
 from app.core.exceptions import AppError, PermissionDeniedError
 from app.integrations.ai.rule_extraction_client import ExtractionCancelledError, SafetyRulesExtractor
 from app.integrations.ai.clip_mapping_client import CLIPMappingClient
 from app.integrations.storage.storage_client import StorageClient
 from app.models.extracted_rule_model import ExtractedRuleModel
 from app.models.regulation_model import RegulationExtractionState, RegulationModel
+from app.repositories.alert_repository import AlertRepository
 from app.repositories.extracted_rule_repository import ExtractedRuleRepository
 from app.repositories.regulation_repository import RegulationRepository
 from app.schemas.regulation_schema import (
@@ -56,6 +58,7 @@ PPE_DETECTOR_CLASSES = [
 ]
 FALL_DETECTOR_CLASSES = ["person_fallen"]
 FIRE_SMOKE_DETECTOR_CLASSES = ["fire", "smoke"]
+logger = logging.getLogger(__name__)
 
 
 class RegulationService:
@@ -69,14 +72,18 @@ class RegulationService:
         regulation_repository: RegulationRepository,
         rule_repository: ExtractedRuleRepository,
         storage_client: StorageClient,
+        alert_repository: AlertRepository,
         safety_extractor: SafetyRulesExtractor | None = None,
         clip_mapping_client: CLIPMappingClient | None = None,
+        clip_mapping_client_factory: Callable[[], CLIPMappingClient | None] | None = None,
     ) -> None:
         self.regulation_repository = regulation_repository
         self.rule_repository = rule_repository
         self.storage_client = storage_client
+        self.alert_repository = alert_repository
         self.safety_extractor = safety_extractor
         self.clip_mapping_client = clip_mapping_client
+        self.clip_mapping_client_factory = clip_mapping_client_factory
 
     @classmethod
     def create(
@@ -84,6 +91,7 @@ class RegulationService:
         regulation_repository: RegulationRepository,
         rule_repository: ExtractedRuleRepository,
         storage_client: StorageClient,
+        alert_repository: AlertRepository,
     ) -> "RegulationService":
         """Factory method to create regulation service."""
         settings = get_settings()
@@ -93,18 +101,13 @@ class RegulationService:
         if settings.HF_TOKEN:
             extractor = SafetyRulesExtractor(settings.HF_TOKEN)
 
-        clip_mapping_client = None
-        try:
-            clip_mapping_client = CLIPMappingClient()
-        except ImportError:
-            clip_mapping_client = None
-
         return cls(
             regulation_repository=regulation_repository,
             rule_repository=rule_repository,
             storage_client=storage_client,
+            alert_repository=alert_repository,
             safety_extractor=extractor,
-            clip_mapping_client=clip_mapping_client,
+            clip_mapping_client_factory=cls._build_clip_mapping_client,
         )
 
     async def upload_and_extract_regulation(
@@ -126,6 +129,7 @@ class RegulationService:
         extracted_payload = await self.extract_regulation(payload.regulation.id, current_user)
         return RegulationUploadResponse(
             regulation=extracted_payload.regulation,
+            regulations=extracted_payload.regulations,
             extracted_rules=extracted_payload.extracted_rules,
             summary=extracted_payload.summary,
         )
@@ -149,73 +153,55 @@ class RegulationService:
         ensure_file_size(file_content, max_size_mb=settings.MAX_PDF_SIZE_MB, label=filename)
 
         organization_id = current_user["organization_id"]
-        current_regulation = await self.regulation_repository.get_latest_regulation(organization_id)
+        current_regulation = await self.regulation_repository.get_current_regulation(organization_id)
+        latest_uploaded_regulation = await self.regulation_repository.get_latest_regulation(organization_id)
 
-        if current_regulation is None:
-            regulation_id = ObjectId()
-            stored_file = await self.storage_client.save_bytes(
-                content=file_content,
-                original_filename=filename,
-                mime_type=file.content_type or "application/pdf",
-                subdirectory=f"regulations/{organization_id}/{regulation_id}/v1",
-            )
-            regulation = RegulationModel(
-                id=regulation_id,
-                organization_id=organization_id,
-                title=title or Path(filename).stem,
-                description=description,
-                document_type="safety_regulation",
-                status=RegulationStatus.ACTIVE,
-                file=stored_file,
-                uploaded_by=current_user["_id"],
-                created_by=current_user["_id"],
-                updated_by=current_user["_id"],
-                extraction=RegulationExtractionState(
-                    status=ExtractionStatus.NOT_STARTED,
-                    model_name=self.safety_extractor.model if self.safety_extractor else None,
-                ),
-            )
-            saved_regulation = await self.regulation_repository.create(regulation)
-        else:
-            if self._is_running_extraction_status((current_regulation.extraction.status)):
-                raise AppError("Stop the current extraction before replacing this PDF.")
-            next_version = current_regulation.version + 1
-            stored_file = await self.storage_client.save_bytes(
-                content=file_content,
-                original_filename=filename,
-                mime_type=file.content_type or "application/pdf",
-                subdirectory=f"regulations/{organization_id}/{current_regulation.id}/v{next_version}",
-            )
-            await self._delete_stored_file(current_regulation.file.storage_path)
-            await self.rule_repository.soft_delete_by_organization(organization_id, updated_by=current_user["_id"])
-            updated_regulation = await self.regulation_repository.update_regulation(
-                current_regulation.id,
-                {
-                    "title": title or Path(filename).stem,
-                    "description": description,
-                    "document_type": "safety_regulation",
-                    "status": RegulationStatus.ACTIVE,
-                    "file": stored_file.model_dump(),
-                    "uploaded_by": current_user["_id"],
-                    "updated_by": current_user["_id"],
-                    "version": next_version,
-                    "extraction": RegulationExtractionState(
-                        status=ExtractionStatus.NOT_STARTED,
-                        model_name=self.safety_extractor.model if self.safety_extractor else None,
-                    ).model_dump(),
-                },
-            )
-            if updated_regulation is None:
-                raise AppError("Failed to update the saved regulation")
-            saved_regulation = updated_regulation
+        if current_regulation is not None and self._is_running_extraction_status(current_regulation.extraction.status):
+            raise AppError("Stop the current extraction before uploading a new PDF.")
+
+        next_version = (latest_uploaded_regulation.version + 1) if latest_uploaded_regulation is not None else 1
+        regulation_id = ObjectId()
+        stored_file = await self.storage_client.save_bytes(
+            content=file_content,
+            original_filename=filename,
+            mime_type=file.content_type or "application/pdf",
+            subdirectory=f"regulations/{organization_id}/{regulation_id}/v{next_version}",
+        )
+        regulation = RegulationModel(
+            id=regulation_id,
+            organization_id=organization_id,
+            title=title or Path(filename).stem,
+            description=description,
+            document_type="safety_regulation",
+            status=RegulationStatus.ACTIVE,
+            file=stored_file,
+            version=next_version,
+            uploaded_by=current_user["_id"],
+            created_by=current_user["_id"],
+            updated_by=current_user["_id"],
+            extraction=RegulationExtractionState(
+                status=ExtractionStatus.NOT_STARTED,
+                model_name=self.safety_extractor.model if self.safety_extractor else None,
+            ),
+        )
+        saved_regulation = await self.regulation_repository.create(regulation)
+        await self.regulation_repository.set_current_regulation(
+            organization_id,
+            regulation_id,
+            updated_by=current_user["_id"],
+        )
+        await self.rule_repository.deactivate_rules_by_organization(
+            organization_id,
+            updated_by=current_user["_id"],
+        )
 
         return await self._build_regulation_payload(saved_regulation)
 
     async def get_current_regulation(self, current_user: dict) -> RegulationCurrentResponse:
         self._ensure_admin(current_user)
-        current_regulation = await self.regulation_repository.get_latest_regulation(current_user["organization_id"])
+        current_regulation = await self.regulation_repository.get_current_regulation(current_user["organization_id"])
         if current_regulation is None:
-            return self._empty_regulation_payload()
+            return await self._empty_regulation_payload(current_user["organization_id"])
         current_regulation = await self._reconcile_stale_extraction_state(current_regulation)
         return await self._build_regulation_payload(current_regulation)
 
@@ -237,7 +223,7 @@ class RegulationService:
         if self._is_running_extraction_status(current_status):
             raise AppError("Extraction is already in progress for this PDF.")
 
-        await self.rule_repository.soft_delete_by_organization(current_user["organization_id"], updated_by=current_user["_id"])
+        await self.rule_repository.soft_delete_by_regulation(regulation_id, updated_by=current_user["_id"])
         updated_regulation = await self.regulation_repository.update_extraction_status(
             regulation_id,
             ExtractionStatus.PENDING,
@@ -283,6 +269,60 @@ class RegulationService:
         self._request_job_stop(regulation_id)
         return await self._build_regulation_payload(updated)
 
+    async def activate_regulation(self, regulation_id: str, current_user: dict) -> RegulationCurrentResponse:
+        self._ensure_admin(current_user)
+
+        regulation = await self.regulation_repository.find_by_id(validate_object_id(regulation_id))
+        if regulation is None:
+            raise AppError("Regulation not found")
+
+        if str(regulation["organization_id"]) != str(current_user["organization_id"]):
+            raise PermissionDeniedError("Regulation does not belong to your organization")
+
+        current_status = str((regulation.get("extraction") or {}).get("status", ExtractionStatus.NOT_STARTED))
+        if self._is_running_extraction_status(current_status):
+            raise AppError("Wait for the current extraction to finish before switching regulations.")
+
+        updated_regulation = await self.regulation_repository.set_current_regulation(
+            current_user["organization_id"],
+            regulation_id,
+            updated_by=current_user["_id"],
+        )
+        if updated_regulation is None:
+            raise AppError("Failed to activate the selected regulation")
+
+        await self.rule_repository.deactivate_rules_by_organization(
+            current_user["organization_id"],
+            updated_by=current_user["_id"],
+        )
+        await self.rule_repository.set_rule_status_by_regulation(
+            regulation_id,
+            EntityStatus.ACTIVE,
+            updated_by=current_user["_id"],
+        )
+
+        return await self._build_regulation_payload(updated_regulation)
+
+    async def get_regulation_file_download(self, regulation_id: str, current_user: dict) -> tuple[bytes, str, str]:
+        self._ensure_admin(current_user)
+
+        regulation = await self.regulation_repository.find_by_id(validate_object_id(regulation_id))
+        if regulation is None:
+            raise AppError("Regulation not found")
+
+        if str(regulation["organization_id"]) != str(current_user["organization_id"]):
+            raise PermissionDeniedError("Regulation does not belong to your organization")
+
+        file_data = regulation.get("file") or {}
+        storage_path = file_data.get("storage_path")
+        if not storage_path:
+            raise AppError("Regulation file is missing from storage")
+
+        content = await self.storage_client.read_bytes(storage_path)
+        filename = file_data.get("original_filename") or f"{regulation.get('title', 'regulation')}.pdf"
+        mime_type = file_data.get("mime_type") or "application/pdf"
+        return content, filename, mime_type
+
     async def delete_regulation(self, regulation_id: str, current_user: dict) -> None:
         self._ensure_admin(current_user)
 
@@ -295,10 +335,34 @@ class RegulationService:
 
         self._request_job_stop(regulation_id)
         await self._delete_stored_file((regulation.get("file") or {}).get("storage_path"))
-        await self.rule_repository.soft_delete_by_organization(current_user["organization_id"], updated_by=current_user["_id"])
+        await self._delete_alerts_for_regulation(
+            regulation_id=regulation_id,
+            organization_id=current_user["organization_id"],
+            updated_by=current_user["_id"],
+        )
+        await self.rule_repository.soft_delete_by_regulation(regulation_id, updated_by=current_user["_id"])
         deleted = await self.regulation_repository.soft_delete(validate_object_id(regulation_id), updated_by=current_user["_id"])
         if not deleted:
             raise AppError("Failed to delete the regulation")
+
+        if str(regulation.get("status")) == RegulationStatus.ACTIVE:
+            remaining_regulations = await self.regulation_repository.list_regulations(current_user["organization_id"])
+            replacement = remaining_regulations[0] if remaining_regulations else None
+            await self.rule_repository.deactivate_rules_by_organization(
+                current_user["organization_id"],
+                updated_by=current_user["_id"],
+            )
+            if replacement is not None:
+                await self.regulation_repository.set_current_regulation(
+                    current_user["organization_id"],
+                    replacement.id,
+                    updated_by=current_user["_id"],
+                )
+                await self.rule_repository.set_rule_status_by_regulation(
+                    replacement.id,
+                    EntityStatus.ACTIVE,
+                    updated_by=current_user["_id"],
+                )
 
     async def set_face_recognition_enabled(
         self,
@@ -417,7 +481,10 @@ class RegulationService:
 
         # Convert extracted data to rule models
         saved_rules = await self._convert_extraction_to_rules(
-            extracted_data, regulation_id, organization_id
+            extracted_data,
+            regulation_id,
+            organization_id,
+            regulation_status=str(regulation["status"]),
         )
 
         self._raise_if_cancelled(cancel_event)
@@ -435,7 +502,9 @@ class RegulationService:
         self,
         extracted_data: dict,
         regulation_id: str,
-        organization_id: str
+        organization_id: str,
+        *,
+        regulation_status: str,
     ) -> List[ExtractedRuleModel]:
         """Convert extracted safety data to rule models.
 
@@ -448,6 +517,7 @@ class RegulationService:
             List of ExtractedRuleModel instances
         """
         saved_rules = []
+        rule_status = EntityStatus.ACTIVE if regulation_status == RegulationStatus.ACTIVE else EntityStatus.INACTIVE
 
         # Process PPE items
         ppe_list = extracted_data.get("PPE_list", [])
@@ -481,7 +551,8 @@ class RegulationService:
                     },
                     "source": {
                         "text_excerpt": ppe_item,
-                    }
+                    },
+                    "status": rule_status,
                 }
                 rule_model = ExtractedRuleModel(**rule_data)
                 saved_data = await self.rule_repository.insert_model(rule_model)
@@ -517,7 +588,8 @@ class RegulationService:
                 },
                 "source": {
                     "text_excerpt": fall_reason,
-                }
+                },
+                "status": rule_status,
             }
             rule_model = ExtractedRuleModel(**rule_data)
             saved_data = await self.rule_repository.insert_model(rule_model)
@@ -553,7 +625,8 @@ class RegulationService:
                 },
                 "source": {
                     "text_excerpt": heat_reason,
-                }
+                },
+                "status": rule_status,
             }
             rule_model = ExtractedRuleModel(**rule_data)
             saved_data = await self.rule_repository.insert_model(rule_model)
@@ -610,16 +683,45 @@ class RegulationService:
         return fallback
 
     def _clip_matches(self, texts: list[str], candidate_classes: list[str]) -> list[str]:
-        if not self.clip_mapping_client or not texts or not candidate_classes:
+        if not texts or not candidate_classes:
+            return []
+
+        clip_mapping_client = self._get_clip_mapping_client()
+        if clip_mapping_client is None:
             return []
 
         try:
             return [
                 match.image_class
-                for match in self.clip_mapping_client.match_text_to_classes(texts, candidate_classes, threshold=0.15)
+                for match in clip_mapping_client.match_text_to_classes(texts, candidate_classes, threshold=0.15)
             ]
         except Exception:
             return []
+
+    def _get_clip_mapping_client(self) -> CLIPMappingClient | None:
+        if self.clip_mapping_client is not None:
+            return self.clip_mapping_client
+
+        if self.clip_mapping_client_factory is None:
+            return None
+
+        try:
+            self.clip_mapping_client = self.clip_mapping_client_factory()
+        except Exception as exc:
+            logger.warning("CLIP mapping disabled due to initialization failure: %s", exc)
+            self.clip_mapping_client = None
+        finally:
+            self.clip_mapping_client_factory = None
+
+        return self.clip_mapping_client
+
+    @staticmethod
+    def _build_clip_mapping_client() -> CLIPMappingClient | None:
+        try:
+            return CLIPMappingClient()
+        except Exception as exc:
+            logger.warning("Unable to initialize CLIP mapping client: %s", exc)
+            return None
 
     def _normalize_ppe_class_for_requirement(self, class_name: str) -> str:
         """Convert negative PPE classes to positive for requirements.
@@ -669,7 +771,7 @@ class RegulationService:
 
     def _regulation_response(self, regulation_doc: dict) -> RegulationResponse:
         file_data = dict(regulation_doc["file"])
-        file_data["public_url"] = self.storage_client.get_access_url(file_data.get("storage_path"))
+        file_data["public_url"] = None
 
         return RegulationResponse(
             id=str(regulation_doc["_id"]),
@@ -727,18 +829,24 @@ class RegulationService:
     async def _build_regulation_payload(self, regulation_doc: dict | RegulationModel) -> RegulationCurrentResponse:
         regulation_data = regulation_doc.model_dump(by_alias=True) if isinstance(regulation_doc, RegulationModel) else regulation_doc
         rules = await self.rule_repository.get_rules_by_regulation(regulation_data["_id"])
+        regulations = await self.regulation_repository.list_regulations(regulation_data["organization_id"])
         rule_responses = [self._rule_response(rule) for rule in rules]
         summary = self._build_summary(rule_responses)
-        summary.face_recognition_enabled = await self.is_face_recognition_enabled(regulation_data["organization_id"])
+        summary.face_recognition_enabled = any(
+            rule.category == RuleCategory.ACCESS_CONTROL.value for rule in rule_responses
+        )
         return RegulationCurrentResponse(
             regulation=self._regulation_response(regulation_data),
+            regulations=[self._regulation_response(regulation.model_dump(by_alias=True)) for regulation in regulations],
             extracted_rules=rule_responses,
             summary=summary,
         )
 
-    def _empty_regulation_payload(self) -> RegulationCurrentResponse:
+    async def _empty_regulation_payload(self, organization_id) -> RegulationCurrentResponse:
+        regulations = await self.regulation_repository.list_regulations(organization_id)
         return RegulationCurrentResponse(
             regulation=None,
+            regulations=[self._regulation_response(regulation.model_dump(by_alias=True)) for regulation in regulations],
             extracted_rules=[],
             summary=RegulationExtractionSummary(
                 total_rules=0,
@@ -753,6 +861,31 @@ class RegulationService:
         if not storage_path:
             return
         await self.storage_client.delete_bytes(storage_path)
+
+    async def _delete_alerts_for_regulation(self, *, regulation_id: str, organization_id, updated_by) -> None:
+        regulation_object_id = validate_object_id(regulation_id)
+        organization_object_id = (
+            organization_id if isinstance(organization_id, ObjectId) else validate_object_id(organization_id)
+        )
+        alerts = await self.alert_repository.list_by_regulation(
+            organization_object_id,
+            regulation_object_id,
+        )
+        if not alerts:
+            return
+
+        for alert in alerts:
+            evidence = alert.get("evidence") or {}
+            frame_storage_path = evidence.get("frame_storage_path")
+            clip_storage_path = evidence.get("clip_storage_path")
+            if frame_storage_path:
+                await self.storage_client.delete_bytes(frame_storage_path)
+            if clip_storage_path:
+                await self.storage_client.delete_bytes(clip_storage_path)
+
+        await self.alert_repository.hard_delete_by_ids(
+            [alert["_id"] for alert in alerts if alert.get("_id") is not None],
+        )
 
     def _queue_extraction_job(self, *, regulation_id: str, organization_id: str, updated_by) -> None:
         self._request_job_stop(regulation_id)
@@ -784,10 +917,6 @@ class RegulationService:
                 cancel_event=cancel_event,
             )
         except (ExtractionCancelledError, asyncio.CancelledError):
-            await self.rule_repository.soft_delete_by_organization(
-                organization_id,
-                updated_by=updated_by,
-            )
             await self.regulation_repository.update_extraction_status(
                 regulation_id,
                 ExtractionStatus.CANCELLED,

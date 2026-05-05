@@ -60,12 +60,14 @@ class RegulationExtractionSummary(BaseModel):
 
 class RegulationUploadResponse(BaseModel):
     regulation: RegulationResponse
+    regulations: list[RegulationResponse]
     extracted_rules: list[ExtractedRuleResponse]
     summary: RegulationExtractionSummary
 
 
 class RegulationCurrentResponse(BaseModel):
     regulation: RegulationResponse | None = None
+    regulations: list[RegulationResponse]
     extracted_rules: list[ExtractedRuleResponse]
     summary: RegulationExtractionSummary
 

@@ -28,6 +28,15 @@ export interface LoginRequest {
   password: string;
 }
 
+export interface ForgotPasswordRequest {
+  email: string;
+  password: string;
+}
+
+export interface ForgotPasswordResponse {
+  message: string;
+}
+
 export interface UpdateMyProfileRequest {
   full_name?: string;
   email?: string;
@@ -294,6 +303,69 @@ export interface SafetyMonitoringResponse {
   alerts: AlertResponse[];
 }
 
+export interface MonitoringSessionReportAlertRequest {
+  alert_id?: string | null;
+  occurred_at: string;
+  image_label: string;
+  type_label: string;
+  detail: string;
+  group: 'critical' | 'compliance' | 'other';
+  persisted: boolean;
+}
+
+export interface SaveMonitoringSessionReportRequest {
+  started_at?: string | null;
+  ended_at?: string | null;
+  head_count?: number | null;
+  zone: string;
+  face_recognition_enabled: boolean;
+  modules: string[];
+  alerts: MonitoringSessionReportAlertRequest[];
+}
+
+export interface MonitoringSessionReportDocument {
+  report_id: string;
+  report_name: string;
+  saved_at: string;
+  organization_id: string;
+  supervisor: {
+    id: string;
+    full_name?: string | null;
+    email?: string | null;
+    role?: string | null;
+  };
+  session: {
+    started_at?: string | null;
+    ended_at?: string | null;
+    duration_seconds?: number | null;
+    zone: string;
+    head_count?: number | null;
+    modules: string[];
+    face_recognition_enabled: boolean;
+  };
+  active_regulation?: {
+    id?: string | null;
+    title?: string | null;
+    version?: number | null;
+    status?: string | null;
+  } | null;
+  summary: {
+    total_alerts: number;
+    critical_alerts: number;
+    compliance_alerts: number;
+    other_alerts: number;
+    persisted_alerts: number;
+    live_only_alerts: number;
+  };
+  alerts: MonitoringSessionReportAlertRequest[];
+}
+
+export interface MonitoringSessionReportResponse {
+  report_id: string;
+  filename: string;
+  report: MonitoringSessionReportDocument;
+}
+
 export interface WebRtcSessionDescriptionPayload {
   sdp: string;
   type: string;
@@ -354,12 +426,14 @@ export interface RegulationExtractionSummary {
 
 export interface RegulationUploadResponse {
   regulation: RegulationResponse;
+  regulations: RegulationResponse[];
   extracted_rules: ExtractedRuleResponse[];
   summary: RegulationExtractionSummary;
 }
 
 export interface RegulationCurrentResponse {
   regulation: RegulationResponse | null;
+  regulations: RegulationResponse[];
   extracted_rules: ExtractedRuleResponse[];
   summary: RegulationExtractionSummary;
 }
@@ -408,6 +482,13 @@ export function registerOrganization(body: RegisterOrganizationRequest) {
 
 export function login(body: LoginRequest) {
   return apiRequest<TokenResponse>('/api/auth/login', {
+    method: 'POST',
+    body,
+  });
+}
+
+export function forgotPassword(body: ForgotPasswordRequest) {
+  return apiRequest<ForgotPasswordResponse>('/api/auth/forgot-password', {
     method: 'POST',
     body,
   });
@@ -555,6 +636,40 @@ export function cancelRegulationExtraction(regulationId: string, token: string) 
   });
 }
 
+export function activateRegulation(regulationId: string, token: string) {
+  return apiRequest<RegulationCurrentResponse>(`/api/regulations/${regulationId}/activate`, {
+    method: 'POST',
+    token,
+  });
+}
+
+export async function downloadRegulation(regulationId: string, token: string) {
+  const response = await fetch(`${API_BASE_URL}/api/regulations/${regulationId}/download`, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    const message =
+      typeof payload?.detail === 'string'
+        ? payload.detail
+        : `Request failed with status ${response.status}`;
+    throw new Error(message);
+  }
+
+  const blob = await response.blob();
+  const contentDisposition = response.headers.get('Content-Disposition') ?? '';
+  const filenameMatch =
+    contentDisposition.match(/filename\*=UTF-8''([^;]+)/i) ??
+    contentDisposition.match(/filename=\"?([^\";]+)\"?/i);
+  const filename = filenameMatch?.[1] ? decodeURIComponent(filenameMatch[1]) : 'regulation.pdf';
+
+  return { blob, filename };
+}
+
 export async function deleteRegulation(regulationId: string, token: string) {
   await apiRequest<null>(`/api/regulations/${regulationId}`, {
     method: 'DELETE',
@@ -626,6 +741,20 @@ export function listAlerts(token: string, limit?: number) {
   });
 }
 
+export async function deleteAlert(alertId: string, token: string) {
+  await apiRequest<null>(`/api/alerts/${alertId}`, {
+    method: 'DELETE',
+    token,
+  });
+}
+
+export async function clearAlertsHistory(token: string) {
+  await apiRequest<null>('/api/alerts/clear', {
+    method: 'POST',
+    token,
+  });
+}
+
 export function resolveStorageUrl(storagePath?: string | null) {
   if (!storagePath) {
     return null;
@@ -642,6 +771,14 @@ export function getMonitoringSafetyWebSocketUrl(token: string) {
   const wsBaseUrl = API_BASE_URL.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:');
   const encodedToken = encodeURIComponent(token);
   return `${wsBaseUrl}/api/monitoring/ws/safety?token=${encodedToken}`;
+}
+
+export function saveMonitoringSessionReport(body: SaveMonitoringSessionReportRequest, token: string) {
+  return apiRequest<MonitoringSessionReportResponse>('/api/monitoring-sessions/report', {
+    method: 'POST',
+    token,
+    body,
+  });
 }
 
 export function createMonitoringSafetyWebRtcOffer(

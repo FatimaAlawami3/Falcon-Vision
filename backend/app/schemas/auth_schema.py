@@ -21,6 +21,15 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=72)
 
 
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=72)
+
+
+class ForgotPasswordResponse(BaseModel):
+    message: str
+
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"

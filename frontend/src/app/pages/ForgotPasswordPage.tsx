@@ -1,32 +1,71 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
+import { Loader2 } from 'lucide-react';
 import { Footer } from '../components/Footer';
 import { WarningModal } from '../components/WarningModal';
+import { forgotPassword } from '../lib/api';
 import logoImage from '../../assets/images/logo.png';
 
 export function ForgotPasswordPage() {
   const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [modalState, setModalState] = useState({ isOpen: false, title: '', message: '' });
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    // Validate email format
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!email || !emailRegex.test(email)) {
       setModalState({
         isOpen: true,
         title: 'Warning!',
-        message: 'Please enter a valid email address.'
+        message: 'Please enter a valid email address.',
       });
       return;
     }
 
-    setModalState({
-      isOpen: true,
-      title: 'Success',
-      message: 'Password reset link has been sent to your email!'
-    });
+    if (password.length < 8) {
+      setModalState({
+        isOpen: true,
+        title: 'Weak Password',
+        message: 'Your new password must be at least 8 characters long.',
+      });
+      return;
+    }
+
+    if (password !== confirmPassword) {
+      setModalState({
+        isOpen: true,
+        title: 'Passwords Do Not Match',
+        message: 'Please make sure both password fields match.',
+      });
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const response = await forgotPassword({ email: email.trim(), password });
+      setModalState({
+        isOpen: true,
+        title: 'Password Updated',
+        message: response.message,
+      });
+      setPassword('');
+      setConfirmPassword('');
+    } catch (error) {
+      setModalState({
+        isOpen: true,
+        title: 'Reset Failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'We could not reset your password right now.',
+      });
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -59,11 +98,43 @@ export function ForgotPasswordPage() {
               />
             </div>
 
+            <div>
+              <label className="block text-[#8b7355] mb-2">New Password</label>
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="w-full px-4 py-3 rounded-xl border border-[#e0d5c7] focus:outline-none focus:border-[#d87545]"
+                placeholder="Enter your new password"
+                required
+              />
+            </div>
+
+            <div>
+              <label className="block text-[#8b7355] mb-2">Confirm New Password</label>
+              <input
+                type="password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                className="w-full px-4 py-3 rounded-xl border border-[#e0d5c7] focus:outline-none focus:border-[#d87545]"
+                placeholder="Confirm your new password"
+                required
+              />
+            </div>
+
             <button
               type="submit"
-              className="w-full bg-[#d87545] text-white py-3 rounded-full shadow-md hover:bg-[#c42c1f] transition-colors"
+              disabled={isSubmitting}
+              className="w-full bg-[#d87545] text-white py-3 rounded-full shadow-md hover:bg-[#c42c1f] transition-colors disabled:opacity-70 flex items-center justify-center"
             >
-              Reset Password
+              {isSubmitting ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Updating Password...
+                </>
+              ) : (
+                'Reset Password'
+              )}
             </button>
 
             <p className="text-center text-[#8b7355]">

@@ -1,7 +1,7 @@
 from pymongo.errors import DuplicateKeyError
 
 from app.core.constants import UserRole, UserStatus, normalize_user_role
-from app.core.exceptions import ConflictError, InactiveUserError, InvalidCredentialsError
+from app.core.exceptions import ConflictError, InactiveUserError, InvalidCredentialsError, NotFoundError
 from app.core.security import create_access_token, hash_password, verify_password
 from app.models.organization_model import OrganizationModel
 from app.models.user_model import UserModel, UserProfile
@@ -10,6 +10,8 @@ from app.repositories.user_repository import UserRepository
 from app.schemas.auth_schema import (
     AuthOrganizationResponse,
     AuthUserResponse,
+    ForgotPasswordRequest,
+    ForgotPasswordResponse,
     LoginRequest,
     OrganizationRegisterRequest,
     RegisterOrganizationResponse,
@@ -90,6 +92,22 @@ class AuthService:
         await self.user_repository.update_last_login(user_doc["_id"])
 
         return TokenResponse(access_token=self._build_token(user_doc))
+
+    async def reset_password_by_email(self, request: ForgotPasswordRequest) -> ForgotPasswordResponse:
+        user_doc = await self.user_repository.find_by_email(str(request.email))
+        if user_doc is None:
+            raise NotFoundError("No account found with this email")
+
+        await self.user_repository.update_user(
+            user_doc["_id"],
+            {
+                "password_hash": hash_password(request.password),
+            },
+        )
+
+        return ForgotPasswordResponse(
+            message="Password reset successfully. You can log in with your new password.",
+        )
 
     def _build_token(self, user_doc: dict) -> str:
         return create_access_token(

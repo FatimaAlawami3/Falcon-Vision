@@ -1,6 +1,7 @@
 from typing import Annotated
+from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Response, UploadFile, status
 
 from app.api.deps import get_current_user, get_regulation_service
 from app.schemas.regulation_schema import (
@@ -33,6 +34,7 @@ async def upload_regulation(
         raise RuntimeError("Saved regulation payload did not include a regulation")
     return RegulationUploadResponse(
         regulation=saved.regulation,
+        regulations=saved.regulations,
         extracted_rules=saved.extracted_rules,
         summary=saved.summary,
     )
@@ -62,6 +64,34 @@ async def cancel_regulation_extraction(
     current_user: Annotated[dict, Depends(get_current_user)],
 ) -> RegulationCurrentResponse:
     return await regulation_service.cancel_extraction(regulation_id, current_user)
+
+
+@router.post("/{regulation_id}/activate", response_model=RegulationCurrentResponse)
+async def activate_regulation(
+    regulation_id: str,
+    regulation_service: Annotated[RegulationService, Depends(get_regulation_service)],
+    current_user: Annotated[dict, Depends(get_current_user)],
+) -> RegulationCurrentResponse:
+    return await regulation_service.activate_regulation(regulation_id, current_user)
+
+
+@router.get("/{regulation_id}/download")
+async def download_regulation(
+    regulation_id: str,
+    regulation_service: Annotated[RegulationService, Depends(get_regulation_service)],
+    current_user: Annotated[dict, Depends(get_current_user)],
+) -> Response:
+    content, filename, mime_type = await regulation_service.get_regulation_file_download(regulation_id, current_user)
+    safe_filename = filename.replace('"', "")
+    return Response(
+        content=content,
+        media_type=mime_type,
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{safe_filename}"; filename*=UTF-8\'\'{quote(filename)}'
+            )
+        },
+    )
 
 
 @router.delete("/{regulation_id}", status_code=status.HTTP_204_NO_CONTENT)

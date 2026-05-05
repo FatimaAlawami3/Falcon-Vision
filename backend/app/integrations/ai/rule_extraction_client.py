@@ -1,7 +1,11 @@
 """LLM-based rule extraction from documents using the same model as the notebook."""
 import json
+import logging
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any, Callable, Dict, List
+
+logger = logging.getLogger(__name__)
 
 
 class ExtractionCancelledError(Exception):
@@ -10,6 +14,8 @@ class ExtractionCancelledError(Exception):
 
 class SafetyRulesExtractor:
     """Extracts safety rules (PPE, Fall, Heat) from documents using LLM."""
+
+    MIN_EXTRACTED_TEXT_CHARS = 200
 
     def __init__(self, HF_TOKEN: str):
         """Initialize the extractor with Hugging Face token.
@@ -189,18 +195,56 @@ class SafetyRulesExtractor:
             Dictionary with extracted rules
         """
         try:
+            from PyPDF2 import PdfReader, PdfWriter
             from docling.document_converter import DocumentConverter
-        except ImportError:
-            raise ImportError("docling package is required. Install with: pip install docling")
+        except ImportError as exc:
+            raise ImportError("PyPDF2 and docling packages are required for PDF extraction.") from exc
 
         try:
-            # Convert PDF to Markdown
-            converter = DocumentConverter()
-            result = converter.convert(str(pdf_path))
-            full_markdown_text = result.document.export_to_markdown()
+            text_segments: list[str] = []
+            pages_needing_ocr: list[int] = []
+            reader = PdfReader(str(pdf_path))
+
+            for page_index, page in enumerate(reader.pages):
+                if should_cancel and should_cancel():
+                    raise ExtractionCancelledError("Extraction stopped by admin.")
+
+                try:
+                    extracted_text = (page.extract_text() or "").strip()
+                except Exception as exc:
+                    logger.warning("Direct text extraction failed for %s page %s: %s", pdf_path.name, page_index + 1, exc)
+                    extracted_text = ""
+
+                if len(extracted_text) >= self.MIN_EXTRACTED_TEXT_CHARS:
+                    text_segments.append(extracted_text)
+                else:
+                    pages_needing_ocr.append(page_index)
+
+            if pages_needing_ocr:
+                converter = DocumentConverter()
+                for page_index in pages_needing_ocr:
+                    if should_cancel and should_cancel():
+                        raise ExtractionCancelledError("Extraction stopped by admin.")
+
+                    page_text = self._extract_single_pdf_page_with_ocr(
+                        pdf_path=pdf_path,
+                        reader=reader,
+                        writer_cls=PdfWriter,
+                        converter=converter,
+                        page_index=page_index,
+                    )
+                    if page_text:
+                        text_segments.append(page_text)
+
+            full_markdown_text = "\n\n".join(segment for segment in text_segments if segment.strip()).strip()
 
             if should_cancel and should_cancel():
                 raise ExtractionCancelledError("Extraction stopped by admin.")
+
+            if len(full_markdown_text) < self.MIN_EXTRACTED_TEXT_CHARS:
+                raise RuntimeError(
+                    "The PDF could not be extracted reliably. Try a smaller PDF, split this document into parts, or use a text-based PDF instead of a scanned one."
+                )
 
             # Extract rules from markdown text
             return self.extract_from_text(full_markdown_text, should_cancel=should_cancel)
@@ -208,12 +252,8 @@ class SafetyRulesExtractor:
         except ExtractionCancelledError:
             raise
         except Exception as e:
-            print(f"Error processing PDF: {e}")
-            return {
-                "PPE_list": [],
-                "Fall_list": {"active": "No", "reason": ""},
-                "Heat_list": {"active": "No", "reason": ""}
-            }
+            logger.exception("Error processing PDF %s", pdf_path)
+            raise RuntimeError(str(e)) from e
 
     def extract_from_file(
         self,
@@ -250,9 +290,40 @@ class SafetyRulesExtractor:
         except ExtractionCancelledError:
             raise
         except Exception as e:
-            print(f"Error processing file: {e}")
-            return {
-                "PPE_list": [],
-                "Fall_list": {"active": "No", "reason": ""},
-                "Heat_list": {"active": "No", "reason": ""}
-            }
+            logger.exception("Error processing file %s", file_path)
+            raise RuntimeError(str(e)) from e
+
+    def _extract_single_pdf_page_with_ocr(
+        self,
+        *,
+        pdf_path: Path,
+        reader,
+        writer_cls,
+        converter,
+        page_index: int,
+    ) -> str:
+        writer = writer_cls()
+        writer.add_page(reader.pages[page_index])
+
+        temp_file_path = None
+        try:
+            with NamedTemporaryFile(suffix=".pdf", delete=False) as temp_file:
+                writer.write(temp_file)
+                temp_file_path = Path(temp_file.name)
+
+            result = converter.convert(str(temp_file_path))
+            return result.document.export_to_markdown().strip()
+        except Exception as exc:
+            logger.warning(
+                "OCR extraction failed for %s page %s: %s",
+                pdf_path.name,
+                page_index + 1,
+                exc,
+            )
+            return ""
+        finally:
+            if temp_file_path is not None:
+                try:
+                    temp_file_path.unlink(missing_ok=True)
+                except OSError:
+                    pass

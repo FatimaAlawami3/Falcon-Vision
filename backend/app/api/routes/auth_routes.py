@@ -6,6 +6,8 @@ from app.api.deps import get_auth_service, get_current_user, get_user_service
 from app.schemas.auth_schema import (
     AuthUserResponse,
     CurrentUserUpdateRequest,
+    ForgotPasswordRequest,
+    ForgotPasswordResponse,
     LoginRequest,
     OrganizationRegisterRequest,
     RegisterOrganizationResponse,
@@ -32,6 +34,14 @@ async def login(
     auth_service: Annotated[AuthService, Depends(get_auth_service)],
 ) -> TokenResponse:
     return await auth_service.login(request)
+
+
+@router.post("/forgot-password", response_model=ForgotPasswordResponse)
+async def forgot_password(
+    request: ForgotPasswordRequest,
+    auth_service: Annotated[AuthService, Depends(get_auth_service)],
+) -> ForgotPasswordResponse:
+    return await auth_service.reset_password_by_email(request)
 
 
 @router.get("/me", response_model=AuthUserResponse)

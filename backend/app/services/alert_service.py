@@ -1,3 +1,4 @@
+import logging
 from datetime import timedelta
 from io import BytesIO
 from typing import Any
@@ -6,19 +7,31 @@ import cv2
 import numpy as np
 from bson import ObjectId
 
+from app.core.exceptions import AppError, PermissionDeniedError
 from app.core.constants import AlertStatus, RuleCategory, Severity
 from app.models.alert_model import AlertEvidence, AlertModel, AlertSnapshot
 from app.repositories.alert_repository import AlertRepository
+from app.repositories.regulation_repository import RegulationRepository
 from app.schemas.alert_schema import AlertListResponse, AlertResponse
 from app.utils.datetime import utc_now
+from app.utils.object_id import validate_object_id
+
+
+logger = logging.getLogger(__name__)
 
 
 class AlertService:
     DUPLICATE_WINDOW_SECONDS = 10
 
-    def __init__(self, alert_repository: AlertRepository, storage_client) -> None:
+    def __init__(
+        self,
+        alert_repository: AlertRepository,
+        storage_client,
+        regulation_repository: RegulationRepository,
+    ) -> None:
         self.alert_repository = alert_repository
         self.storage_client = storage_client
+        self.regulation_repository = regulation_repository
 
     async def list_alerts(self, organization_id: str | ObjectId, *, limit: int | None = None) -> AlertListResponse:
         organization_object_id = self._ensure_object_id(organization_id)
@@ -40,6 +53,7 @@ class AlertService:
         image_bytes: bytes | None = None,
         bbox: list[float] | None = None,
         employee_name: str | None = None,
+        regulation_id: str | ObjectId | None = None,
     ) -> AlertResponse | None:
         organization_object_id = self._ensure_object_id(organization_id)
         detected_at = detected_at or utc_now()
@@ -52,6 +66,11 @@ class AlertService:
         )
         if duplicate is not None:
             return None
+
+        regulation_object_id = await self._resolve_regulation_id(
+            organization_object_id,
+            regulation_id=regulation_id,
+        )
 
         evidence_path = None
         if image_bytes and bbox:
@@ -67,6 +86,7 @@ class AlertService:
 
         alert = AlertModel(
             organization_id=organization_object_id,
+            regulation_id=regulation_object_id,
             title=title,
             message=message,
             category=category,
@@ -78,6 +98,39 @@ class AlertService:
         )
         saved = await self.alert_repository.create(alert)
         return self._to_response(saved)
+
+    async def delete_alert(self, alert_id: str, current_user: dict) -> None:
+        alert_object_id = validate_object_id(alert_id)
+        alert = await self.alert_repository.find_by_id(alert_object_id)
+        if alert is None:
+            raise AppError("Alert not found")
+
+        if str(alert["organization_id"]) != str(current_user["organization_id"]):
+            raise PermissionDeniedError("Alert does not belong to your organization")
+
+        await self._delete_alert_documents([alert], updated_by=current_user["_id"])
+
+    async def clear_alert_history(self, current_user: dict) -> int:
+        organization_object_id = self._ensure_object_id(current_user["organization_id"])
+        alerts = await self.alert_repository.list_all_by_organization(organization_object_id)
+        await self._delete_alert_documents(alerts, updated_by=current_user["_id"])
+        return len(alerts)
+
+    async def delete_alerts_for_regulation(
+        self,
+        regulation_id: str | ObjectId,
+        *,
+        organization_id: str | ObjectId,
+        updated_by,
+    ) -> int:
+        organization_object_id = self._ensure_object_id(organization_id)
+        regulation_object_id = self._ensure_object_id(regulation_id)
+        alerts = await self.alert_repository.list_by_regulation(
+            organization_object_id,
+            regulation_object_id,
+        )
+        await self._delete_alert_documents(alerts, updated_by=updated_by)
+        return len(alerts)
 
     def _crop_image_bytes(self, image_bytes: bytes, bbox: list[float]) -> bytes | None:
         image = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
@@ -119,6 +172,45 @@ class AlertService:
                 (alert_doc.get("evidence") or {}).get("frame_storage_path")
             ),
         )
+
+    async def _resolve_regulation_id(
+        self,
+        organization_id: ObjectId,
+        *,
+        regulation_id: str | ObjectId | None,
+    ) -> ObjectId | None:
+        if regulation_id is not None:
+            return self._ensure_object_id(regulation_id)
+
+        current_regulation = await self.regulation_repository.get_current_regulation(organization_id)
+        return current_regulation.id if current_regulation is not None else None
+
+    async def _delete_alert_documents(
+        self,
+        alerts: list[dict[str, Any]],
+        *,
+        updated_by,
+    ) -> None:
+        if not alerts:
+            return
+
+        for alert in alerts:
+            evidence = alert.get("evidence") or {}
+            frame_storage_path = evidence.get("frame_storage_path")
+            clip_storage_path = evidence.get("clip_storage_path")
+            if frame_storage_path:
+                await self._delete_storage_path(frame_storage_path)
+            if clip_storage_path:
+                await self._delete_storage_path(clip_storage_path)
+
+        alert_ids = [alert["_id"] for alert in alerts if alert.get("_id") is not None]
+        await self.alert_repository.hard_delete_by_ids(alert_ids)
+
+    async def _delete_storage_path(self, storage_path: str) -> None:
+        try:
+            await self.storage_client.delete_bytes(storage_path)
+        except Exception as exc:
+            logger.warning("Failed to delete alert evidence from storage (%s): %s", storage_path, exc)
 
     def _ensure_object_id(self, value: str | ObjectId) -> ObjectId:
         return value if isinstance(value, ObjectId) else ObjectId(value)

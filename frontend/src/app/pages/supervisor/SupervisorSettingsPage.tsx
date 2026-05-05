@@ -1,12 +1,15 @@
+import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { User, LogOut } from 'lucide-react';
 import { toast } from 'sonner';
 import { Navigation } from '../../components/Navigation';
 import { Footer } from '../../components/Footer';
+import { WarningConfirmModal } from '../../components/WarningConfirmModal';
 import { clearAuthSession } from '../../lib/auth';
 
 export function SupervisorSettingsPage() {
   const navigate = useNavigate();
+  const [isLogoutConfirmOpen, setIsLogoutConfirmOpen] = useState(false);
   
   const menuItems = [
     { icon: User, label: 'Profile', path: '/supervisor/profile' },
@@ -15,14 +18,17 @@ export function SupervisorSettingsPage() {
   
   const handleClick = (item: typeof menuItems[0]) => {
     if (item.isLogout) {
-      if (window.confirm('Are you sure you want to log out?')) {
-        clearAuthSession();
-        toast.success('Logged out successfully');
-        navigate('/login', { replace: true });
-      }
+      setIsLogoutConfirmOpen(true);
     } else {
       navigate(item.path);
     }
+  };
+
+  const handleLogoutConfirm = () => {
+    setIsLogoutConfirmOpen(false);
+    clearAuthSession();
+    toast.success('Logged out successfully');
+    navigate('/login', { replace: true });
   };
   
   return (
@@ -53,6 +59,14 @@ export function SupervisorSettingsPage() {
       </div>
       
       <Footer />
+
+      <WarningConfirmModal
+        isOpen={isLogoutConfirmOpen}
+        onConfirm={handleLogoutConfirm}
+        onCancel={() => setIsLogoutConfirmOpen(false)}
+        title="Log Out"
+        message="Are you sure you want to log out?"
+      />
     </div>
   );
 }

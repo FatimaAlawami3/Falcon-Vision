@@ -32,6 +32,7 @@ class AlertAction(BaseModel):
 class AlertModel(TenantModel):
     detection_id: PyObjectId | None = None
     monitoring_session_id: PyObjectId | None = None
+    regulation_id: PyObjectId | None = None
     title: str
     message: str
     category: RuleCategory

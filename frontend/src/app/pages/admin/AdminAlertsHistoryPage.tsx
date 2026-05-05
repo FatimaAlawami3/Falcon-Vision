@@ -3,7 +3,8 @@ import { Navigation } from '../../components/Navigation';
 import { Footer } from '../../components/Footer';
 import { ResponsiveContainer, BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip } from 'recharts';
 import { getAccessToken } from '../../lib/auth';
-import { listAlerts, resolveStorageUrl, type AlertResponse } from '../../lib/api';
+import { WarningConfirmModal } from '../../components/WarningConfirmModal';
+import { clearAlertsHistory, deleteAlert, listAlerts, resolveStorageUrl, type AlertResponse } from '../../lib/api';
 
 function getAlertType(alert: AlertResponse) {
   const message = alert.message.toLowerCase();
@@ -54,6 +55,17 @@ export function AdminAlertsHistoryPage() {
   const [dateFilter, setDateFilter] = useState('');
   const [typeFilter, setTypeFilter] = useState('All');
   const [alerts, setAlerts] = useState<AlertResponse[]>([]);
+  const [confirmState, setConfirmState] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    onConfirm: (() => void) | null;
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    onConfirm: null,
+  });
 
   useEffect(() => {
     const token = getAccessToken();
@@ -67,6 +79,42 @@ export function AdminAlertsHistoryPage() {
       setAlerts([]);
     });
   }, []);
+
+  const withToken = (action: (token: string) => Promise<void>) => {
+    const token = getAccessToken();
+    if (!token) {
+      return;
+    }
+    void action(token).catch(() => {});
+  };
+
+  const promptDeleteAlert = (alertId: string) => {
+    setConfirmState({
+      isOpen: true,
+      title: 'Delete Violation',
+      message: 'This will remove the selected violation from alert history.',
+      onConfirm: () => {
+        withToken(async (token) => {
+          await deleteAlert(alertId, token);
+          setAlerts((current) => current.filter((alert) => alert.id !== alertId));
+        });
+      },
+    });
+  };
+
+  const promptClearAlerts = () => {
+    setConfirmState({
+      isOpen: true,
+      title: 'Clear Alert History',
+      message: 'This will remove all alert history records for your company only.',
+      onConfirm: () => {
+        withToken(async (token) => {
+          await clearAlertsHistory(token);
+          setAlerts([]);
+        });
+      },
+    });
+  };
 
   const filteredAlerts = useMemo(() => {
     return alerts.filter((alert) => {
@@ -139,7 +187,7 @@ export function AdminAlertsHistoryPage() {
           </div>
 
           <div className="bg-white rounded-3xl shadow-xl p-6 border border-[#d4cbb7] mb-6">
-            <div className="grid md:grid-cols-3 gap-4">
+            <div className="grid md:grid-cols-4 gap-4 items-end">
               <div>
                 <label className="block text-[#6b5d4f] mb-2">Search by Date</label>
                 <input
@@ -163,6 +211,15 @@ export function AdminAlertsHistoryPage() {
                   ))}
                 </select>
               </div>
+              <div className="flex md:justify-end">
+                <button
+                  type="button"
+                  onClick={promptClearAlerts}
+                  className="w-full rounded-xl border border-[#d4cbb7] bg-white px-4 py-3 text-[#8b4a32] shadow-sm transition-colors hover:bg-[#fff3e6]"
+                >
+                  Clear History
+                </button>
+              </div>
             </div>
           </div>
 
@@ -177,6 +234,7 @@ export function AdminAlertsHistoryPage() {
                     <th className="text-left py-3 px-4 text-[#6b5d4f]">Detected Image</th>
                     <th className="text-left py-3 px-4 text-[#6b5d4f]">Alert Type</th>
                     <th className="text-left py-3 px-4 text-[#6b5d4f]">Location</th>
+                    <th className="text-left py-3 px-4 text-[#6b5d4f]">Action</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -212,12 +270,21 @@ export function AdminAlertsHistoryPage() {
                             <p className="text-sm text-[#6b5d4f] mt-1">{alert.message}</p>
                           </td>
                           <td className="py-3 px-4 text-[#6b5d4f]">{alert.zone_name ?? '-'}</td>
+                          <td className="py-3 px-4">
+                            <button
+                              type="button"
+                              onClick={() => promptDeleteAlert(alert.id)}
+                              className="rounded-full border border-[#d4bfa7] bg-white px-4 py-2 text-sm text-[#8b4a32] shadow-sm transition-colors hover:bg-[#fff3e6]"
+                            >
+                              Delete
+                            </button>
+                          </td>
                         </tr>
                       );
                     })
                   ) : (
                     <tr>
-                      <td colSpan={5} className="py-8 text-center text-[#6b5d4f]">
+                      <td colSpan={6} className="py-8 text-center text-[#6b5d4f]">
                         No alerts found for the selected filters.
                       </td>
                     </tr>
@@ -230,6 +297,17 @@ export function AdminAlertsHistoryPage() {
       </div>
 
       <Footer />
+      <WarningConfirmModal
+        isOpen={confirmState.isOpen}
+        onCancel={() => setConfirmState({ isOpen: false, title: '', message: '', onConfirm: null })}
+        onConfirm={() => {
+          const action = confirmState.onConfirm;
+          setConfirmState({ isOpen: false, title: '', message: '', onConfirm: null });
+          action?.();
+        }}
+        title={confirmState.title}
+        message={confirmState.message}
+      />
     </div>
   );
 }

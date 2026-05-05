@@ -561,7 +561,11 @@ async def monitoring_safety_websocket(
     ppe_service = get_ppe_service(get_employee_repository(), get_extracted_rule_repository(), get_regulation_repository())
     fall_service = get_fall_service(get_database())
     fire_service = get_fire_service(get_database())
-    alert_service = get_alert_service(get_alert_repository(), get_local_storage_client())
+    alert_service = get_alert_service(
+        get_alert_repository(),
+        get_local_storage_client(),
+        get_regulation_repository(),
+    )
 
     try:
         while True:

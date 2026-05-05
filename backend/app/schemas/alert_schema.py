@@ -20,3 +20,7 @@ class AlertResponse(BaseModel):
 class AlertListResponse(BaseModel):
     items: list[AlertResponse]
     total: int
+
+
+class AlertClearRequest(BaseModel):
+    alert_ids: list[str]

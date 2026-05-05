@@ -1,6 +1,5 @@
 from functools import lru_cache
 from typing import Annotated
-from functools import lru_cache
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
@@ -17,6 +16,7 @@ from app.repositories.employee_face_repository import EmployeeFaceRepository
 from app.repositories.employee_repository import EmployeeRepository
 from app.repositories.extracted_rule_repository import ExtractedRuleRepository
 from app.repositories.alert_repository import AlertRepository
+from app.repositories.monitoring_session_repository import MonitoringSessionRepository
 from app.repositories.organization_repository import OrganizationRepository
 from app.repositories.regulation_repository import RegulationRepository
 from app.repositories.user_repository import UserRepository
@@ -26,6 +26,7 @@ from app.services.employee_service import EmployeeService
 from app.services.employee_face_service import EmployeeFaceService
 from app.services.fall_service import FallDetectionService
 from app.services.fire_service import FireDetectionService
+from app.services.monitoring_session_service import MonitoringSessionService
 from app.services.ppe_service import PPEService
 from app.services.regulation_service import RegulationService
 from app.services.user_service import UserService
@@ -61,6 +62,10 @@ def get_extracted_rule_repository() -> ExtractedRuleRepository:
 
 def get_alert_repository() -> AlertRepository:
     return AlertRepository(get_database())
+
+
+def get_monitoring_session_repository() -> MonitoringSessionRepository:
+    return MonitoringSessionRepository(get_database())
 
 
 def get_auth_service(
@@ -111,8 +116,9 @@ def get_local_storage_client() -> StorageClient:
 def get_alert_service(
     alert_repository: Annotated[AlertRepository, Depends(get_alert_repository)],
     storage_client: Annotated[StorageClient, Depends(get_storage_client)],
+    regulation_repository: Annotated[RegulationRepository, Depends(get_regulation_repository)],
 ) -> AlertService:
-    return AlertService(alert_repository, storage_client)
+    return AlertService(alert_repository, storage_client, regulation_repository)
 
 
 def get_employee_face_service(
@@ -141,12 +147,30 @@ def get_ppe_service(
     return PPEService.create(employee_repository, rule_repository, regulation_repository)
 
 
+@lru_cache(maxsize=1)
+def _build_regulation_service() -> RegulationService:
+    return RegulationService.create(
+        RegulationRepository(get_database()),
+        ExtractedRuleRepository(get_database()),
+        get_storage_client(),
+        AlertRepository(get_database()),
+    )
+
+
 def get_regulation_service(
     regulation_repository: Annotated[RegulationRepository, Depends(get_regulation_repository)],
     rule_repository: Annotated[ExtractedRuleRepository, Depends(get_extracted_rule_repository)],
     storage_client: Annotated[StorageClient, Depends(get_storage_client)],
 ) -> RegulationService:
-    return RegulationService.create(regulation_repository, rule_repository, storage_client)
+    _ = (regulation_repository, rule_repository, storage_client)
+    return _build_regulation_service()
+
+
+def get_monitoring_session_service(
+    monitoring_session_repository: Annotated[MonitoringSessionRepository, Depends(get_monitoring_session_repository)],
+    regulation_repository: Annotated[RegulationRepository, Depends(get_regulation_repository)],
+) -> MonitoringSessionService:
+    return MonitoringSessionService(monitoring_session_repository, regulation_repository)
 
 
 def get_fall_service(

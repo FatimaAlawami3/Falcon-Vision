@@ -13,7 +13,9 @@ import { WarningModal } from '../../components/WarningModal';
 import { WarningConfirmModal } from '../../components/WarningConfirmModal';
 import { clearAuthSession, getAccessToken } from '../../lib/auth';
 import {
+  clearAlertsHistory,
   type AlertResponse,
+  deleteAlert,
   type FaceRecognitionResponse,
   type LivePPEResult,
   type FallDetectionResponse,
@@ -21,6 +23,8 @@ import {
   getFaceRecognitionStatus,
   getMonitoringSafetyWebSocketUrl,
   listAlerts,
+  type MonitoringSessionReportDocument,
+  saveMonitoringSessionReport,
   resolveStorageUrl,
   recognizeEmployeeFace,
 } from '../../lib/api';
@@ -39,6 +43,7 @@ const FACE_DETECTION_INTERVAL_MS = 140;
 
 type AlertRow = {
   id: string;
+  occurredAt: string;
   date: string;
   time: string;
   image: string;
@@ -486,11 +491,181 @@ function getAlertGroup(alert: Pick<AlertRow, 'typeLabel'>): AlertGroup {
   return 'other';
 }
 
+function escapePdfText(value: string) {
+  return value
+    .replace(/\\/g, '\\\\')
+    .replace(/\(/g, '\\(')
+    .replace(/\)/g, '\\)');
+}
+
+function wrapPdfText(value: string, maxChars = 92) {
+  const words = value.split(/\s+/).filter(Boolean);
+  if (words.length === 0) {
+    return [''];
+  }
+
+  const lines: string[] = [];
+  let current = words[0];
+
+  for (const word of words.slice(1)) {
+    const candidate = `${current} ${word}`;
+    if (candidate.length <= maxChars) {
+      current = candidate;
+      continue;
+    }
+
+    lines.push(current);
+    current = word;
+  }
+
+  lines.push(current);
+  return lines;
+}
+
+function buildMonitoringReportLines(report: MonitoringSessionReportDocument) {
+  const lines: string[] = [];
+  lines.push(`Falcon Vision Monitoring Session Report`);
+  lines.push(`Saved At: ${new Date(report.saved_at).toLocaleString()}`);
+  lines.push(`Report Name: ${report.report_name}`);
+  lines.push('');
+  lines.push('Supervisor');
+  lines.push(`Name: ${report.supervisor.full_name || 'N/A'}`);
+  lines.push(`Email: ${report.supervisor.email || 'N/A'}`);
+  lines.push(`Role: ${report.supervisor.role || 'N/A'}`);
+  lines.push('');
+  lines.push('Session');
+  lines.push(`Zone: ${report.session.zone}`);
+  lines.push(`Started At: ${report.session.started_at ? new Date(report.session.started_at).toLocaleString() : 'N/A'}`);
+  lines.push(`Ended At: ${report.session.ended_at ? new Date(report.session.ended_at).toLocaleString() : 'N/A'}`);
+  lines.push(`Duration (seconds): ${report.session.duration_seconds ?? 'N/A'}`);
+  lines.push(`Head Count: ${report.session.head_count ?? 'N/A'}`);
+  lines.push(`Face Recognition Enabled: ${report.session.face_recognition_enabled ? 'Yes' : 'No'}`);
+  lines.push(`Modules: ${report.session.modules.join(', ') || 'N/A'}`);
+  lines.push('');
+  lines.push('Active Regulation');
+  lines.push(`Title: ${report.active_regulation?.title || 'N/A'}`);
+  lines.push(`Version: ${report.active_regulation?.version ?? 'N/A'}`);
+  lines.push(`Status: ${report.active_regulation?.status || 'N/A'}`);
+  lines.push('');
+  lines.push('Summary');
+  lines.push(`Total Alerts: ${report.summary.total_alerts}`);
+  lines.push(`Critical Alerts: ${report.summary.critical_alerts}`);
+  lines.push(`Compliance Alerts: ${report.summary.compliance_alerts}`);
+  lines.push(`Other Alerts: ${report.summary.other_alerts}`);
+  lines.push(`Persisted Alerts: ${report.summary.persisted_alerts}`);
+  lines.push(`Live-only Alerts: ${report.summary.live_only_alerts}`);
+  lines.push('');
+  lines.push('Alerts');
+
+  if (report.alerts.length === 0) {
+    lines.push('No alerts were recorded during this session.');
+    return lines;
+  }
+
+  report.alerts.forEach((alert, index) => {
+    lines.push(`${index + 1}. ${alert.type_label} - ${new Date(alert.occurred_at).toLocaleString()}`);
+    lines.push(`Group: ${alert.group}`);
+    lines.push(`Image Label: ${alert.image_label}`);
+    lines.push(`Saved To DB: ${alert.persisted ? 'Yes' : 'No'}`);
+    wrapPdfText(`Detail: ${alert.detail}`, 88).forEach((line) => lines.push(line));
+    lines.push('');
+  });
+
+  return lines;
+}
+
+function buildPdfBlob(report: MonitoringSessionReportDocument) {
+  const lines = buildMonitoringReportLines(report);
+  const pageHeight = 792;
+  const top = 760;
+  const bottom = 48;
+  const lineHeight = 16;
+  const fontSize = 11;
+  const pages: string[][] = [];
+
+  let currentPage: string[] = [];
+  let cursorY = top;
+
+  for (const line of lines) {
+    if (cursorY < bottom) {
+      pages.push(currentPage);
+      currentPage = [];
+      cursorY = top;
+    }
+
+    currentPage.push(`BT /F1 ${fontSize} Tf 48 ${cursorY} Td (${escapePdfText(line)}) Tj ET`);
+    cursorY -= lineHeight;
+  }
+
+  if (currentPage.length > 0) {
+    pages.push(currentPage);
+  }
+
+  const objects: string[] = [];
+  objects.push('1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj');
+
+  const pageObjectIds = pages.map((_page, index) => 4 + index * 2);
+  objects.push(`2 0 obj << /Type /Pages /Kids [${pageObjectIds.map((id) => `${id} 0 R`).join(' ')}] /Count ${pages.length} >> endobj`);
+  objects.push('3 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj');
+
+  pages.forEach((pageLines, index) => {
+    const pageId = 4 + index * 2;
+    const contentId = pageId + 1;
+    const contentStream = pageLines.join('\n');
+    objects.push(
+      `${pageId} 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 ${pageHeight}] /Resources << /Font << /F1 3 0 R >> >> /Contents ${contentId} 0 R >> endobj`,
+    );
+    objects.push(
+      `${contentId} 0 obj << /Length ${contentStream.length} >> stream\n${contentStream}\nendstream endobj`,
+    );
+  });
+
+  let pdf = '%PDF-1.4\n';
+  const offsets = [0];
+  for (const object of objects) {
+    offsets.push(pdf.length);
+    pdf += `${object}\n`;
+  }
+
+  const xrefStart = pdf.length;
+  pdf += `xref\n0 ${objects.length + 1}\n`;
+  pdf += '0000000000 65535 f \n';
+  for (let index = 1; index < offsets.length; index += 1) {
+    pdf += `${String(offsets[index]).padStart(10, '0')} 00000 n \n`;
+  }
+  pdf += `trailer << /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF`;
+
+  return new Blob([pdf], { type: 'application/pdf' });
+}
+
+function downloadPdfReport(filename: string, report: MonitoringSessionReportDocument) {
+  const blob = buildPdfBlob(report);
+  const objectUrl = window.URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = objectUrl;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.URL.revokeObjectURL(objectUrl);
+}
+
 export function MonitoringPage() {
   const location = useLocation();
   const isAdminView = location.pathname.startsWith('/admin');
   const [headCount, setHeadCount] = useState<number | null>(null);
   const [modalState, setModalState] = useState({ isOpen: false, title: '', message: '' });
+  const [alertConfirmState, setAlertConfirmState] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    onConfirm: (() => void) | null;
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    onConfirm: null,
+  });
   const [exitConfirm, setExitConfirm] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isRecognizing, setIsRecognizing] = useState(false);
@@ -505,6 +680,8 @@ export function MonitoringPage() {
   const [isFaceRecognitionActive, setIsFaceRecognitionActive] = useState(true);
   const [alerts, setAlerts] = useState<AlertRow[]>([]);
   const [detectionOverlays, setDetectionOverlays] = useState<DetectionOverlay[]>([]);
+  const [sessionStartedAt, setSessionStartedAt] = useState<string | null>(null);
+  const [isSavingReport, setIsSavingReport] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -517,6 +694,7 @@ export function MonitoringPage() {
   const lastTrackedFaceAtRef = useRef(0);
   const safetySocketRef = useRef<WebSocket | null>(null);
   const latestSafetyFrameRef = useRef<CapturedVideoFrame | null>(null);
+  const sessionStartedAtRef = useRef<string | null>(null);
   const detectorInFlightRef = useRef({
     face: false,
     safety: false,
@@ -557,6 +735,7 @@ export function MonitoringPage() {
     const now = new Date();
     const nextAlert: AlertRow = {
       id: `${now.getTime()}-${typeLabel}-${image}`,
+      occurredAt: now.toISOString(),
       date: now.toLocaleDateString('en-CA'),
       time: now.toLocaleTimeString('en-US', {
         hour: '2-digit',
@@ -572,11 +751,13 @@ export function MonitoringPage() {
   };
 
   const hasEvidencePreview = (alert: AlertRow) => Boolean(alert.imageUrl);
+  const isPersistedAlert = (alert: AlertRow) => !alert.id.startsWith('live-');
 
   const mapSavedAlertRow = (alert: AlertResponse): AlertRow => {
     const detectedAt = new Date(alert.detected_at);
     return {
       id: alert.id,
+      occurredAt: detectedAt.toISOString(),
       date: detectedAt.toLocaleDateString('en-CA'),
       time: detectedAt.toLocaleTimeString('en-US', {
         hour: '2-digit',
@@ -596,8 +777,18 @@ export function MonitoringPage() {
 
     setAlerts((current) => {
       const next = [...current];
+      const sessionStartedAtMs = sessionStartedAtRef.current
+        ? Date.parse(sessionStartedAtRef.current)
+        : Number.NaN;
 
       savedAlerts.forEach((alert) => {
+        if (
+          Number.isFinite(sessionStartedAtMs) &&
+          Date.parse(alert.detected_at) < sessionStartedAtMs
+        ) {
+          return;
+        }
+
         if (next.some((item) => item.id === alert.id)) {
           return;
         }
@@ -657,7 +848,8 @@ export function MonitoringPage() {
     lastTrackedFaceAtRef.current = 0;
   };
 
-  const stopCameraStream = () => {
+  const stopCameraStream = (options?: { preserveSessionData?: boolean }) => {
+    const preserveSessionData = options?.preserveSessionData ?? false;
     stopTrackingLoop();
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
@@ -669,15 +861,10 @@ export function MonitoringPage() {
     setHasLiveVideo(false);
     setTrackedFaceBox(null);
     setIsLocalTrackingEnabled(false);
-    setIsFaceRecognitionActive(true);
     setIsStreaming(false);
     setIsRecognizing(false);
-    setRecognitionResult(null);
-    setPpeResult(null);
-    setFallResult(null);
-    setFireResult(null);
-    setHeadCount(null);
     setDetectionOverlays([]);
+    setIsSavingReport(false);
     detectorInFlightRef.current = {
       face: false,
       safety: false,
@@ -689,6 +876,17 @@ export function MonitoringPage() {
     latestSafetyFrameRef.current = null;
     safetySocketRef.current?.close();
     safetySocketRef.current = null;
+
+    if (!preserveSessionData) {
+      setIsFaceRecognitionActive(true);
+      setRecognitionResult(null);
+      setPpeResult(null);
+      setFallResult(null);
+      setFireResult(null);
+      setHeadCount(null);
+      setSessionStartedAt(null);
+      sessionStartedAtRef.current = null;
+    }
   };
 
   useEffect(() => {
@@ -1093,6 +1291,7 @@ export function MonitoringPage() {
             const detectedAt = new Date(result.alert.detected_at);
             const nextAlert = {
               id: result.alert.id,
+              occurredAt: detectedAt.toISOString(),
               date: detectedAt.toLocaleDateString('en-CA'),
               time: detectedAt.toLocaleTimeString('en-US', {
                 hour: '2-digit',
@@ -1118,6 +1317,7 @@ export function MonitoringPage() {
               const detectedAt = new Date(result.alert.detected_at);
               const nextAlert = {
                 id: result.alert.id,
+                occurredAt: detectedAt.toISOString(),
                 date: detectedAt.toLocaleDateString('en-CA'),
                 time: detectedAt.toLocaleTimeString('en-US', {
                   hour: '2-digit',
@@ -1372,6 +1572,9 @@ export function MonitoringPage() {
       setHeadCount(null);
       setAlerts([]);
       setDetectionOverlays([]);
+      const nextSessionStartedAt = new Date().toISOString();
+      setSessionStartedAt(nextSessionStartedAt);
+      sessionStartedAtRef.current = nextSessionStartedAt;
       lastAlertSignatureRef.current = {
         face: '',
         ppe: '',
@@ -1399,16 +1602,82 @@ export function MonitoringPage() {
   };
 
   const handleStopCamera = () => {
-    stopCameraStream();
+    stopCameraStream({ preserveSessionData: true });
     setCameraMessage('Camera stopped. Start the stream again when you want to resume monitoring.');
   };
 
-  const handleSave = () => {
-    setModalState({
-      isOpen: true,
-      title: 'Success',
-      message: 'Monitoring report saved successfully!',
+  const handleSave = async () => {
+    const token = getAccessToken();
+    if (!token) {
+      setModalState({
+        isOpen: true,
+        title: 'Session Expired',
+        message: 'Please log in again before saving the monitoring session report.',
+      });
+      return;
+    }
+
+    const endedAt = new Date().toISOString();
+    const sessionAlerts = alerts.filter((alert) => {
+      if (!sessionStartedAt) {
+        return true;
+      }
+
+      return Date.parse(alert.occurredAt) >= Date.parse(sessionStartedAt);
     });
+
+    setIsSavingReport(true);
+    try {
+      const response = await saveMonitoringSessionReport(
+        {
+          started_at: sessionStartedAt,
+          ended_at: endedAt,
+          head_count: headCount,
+          zone: DEFAULT_MONITORING_ZONE,
+          face_recognition_enabled: isFaceRecognitionActive,
+          modules: [
+            'ppe_detection',
+            'fall_detection',
+            'fire_smoke_detection',
+            ...(isFaceRecognitionActive ? ['face_access_control'] : []),
+          ],
+          alerts: sessionAlerts.map((alert) => ({
+            alert_id: isPersistedAlert(alert) ? alert.id : null,
+            occurred_at: alert.occurredAt,
+            image_label: alert.image,
+            type_label: alert.typeLabel,
+            detail: alert.detail,
+            group: getAlertGroup(alert),
+            persisted: isPersistedAlert(alert),
+          })),
+        },
+        token,
+      );
+
+      const pdfFilename = response.filename.replace(/\.json$/i, '.pdf');
+      downloadPdfReport(pdfFilename, response.report);
+      setModalState({
+        isOpen: true,
+        title: 'Report Saved',
+        message: 'The monitoring session report was saved and downloaded to this device as a PDF.',
+      });
+    } catch (error) {
+      if (isTokenError(error)) {
+        handleTokenExpiry();
+        return;
+      }
+
+      setModalState({
+        isOpen: true,
+        title: 'Save Failed',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'The monitoring session report could not be saved right now.',
+      });
+    } finally {
+      setIsSavingReport(false);
+    }
   };
 
   const handleExitClick = () => {
@@ -1423,6 +1692,89 @@ export function MonitoringPage() {
 
   const handleExitCancel = () => {
     setExitConfirm(false);
+  };
+
+  const promptDeleteMonitoringAlert = (alert: AlertRow) => {
+    setAlertConfirmState({
+      isOpen: true,
+      title: 'Delete Violation',
+      message: isPersistedAlert(alert)
+        ? 'This will remove the selected violation from alert history.'
+        : 'This will remove the live violation card from this monitoring view.',
+      onConfirm: () => {
+        const removeLocalAlert = () => {
+          setAlerts((current) => current.filter((item) => item.id !== alert.id));
+        };
+
+        if (!isPersistedAlert(alert)) {
+          removeLocalAlert();
+          return;
+        }
+
+        const token = getAccessToken();
+        if (!token) {
+          showWarning('Please log in again before deleting this violation.');
+          return;
+        }
+
+        void deleteAlert(alert.id, token)
+          .then(() => {
+            removeLocalAlert();
+          })
+          .catch((error) => {
+            if (isTokenError(error)) {
+              clearAuthSession();
+              setModalState({
+                isOpen: true,
+                title: 'Session Expired',
+                message: 'Your login session expired. Please log in again.',
+              });
+              window.setTimeout(() => {
+                window.location.href = '/login';
+              }, 300);
+              return;
+            }
+
+            showWarning(error instanceof Error ? error.message : 'Failed to delete the selected violation.');
+          });
+      },
+    });
+  };
+
+  const promptClearMonitoringAlerts = () => {
+    setAlertConfirmState({
+      isOpen: true,
+      title: 'Clear Alert History',
+      message: 'This will remove all alert history records for your company and clear the monitoring list.',
+      onConfirm: () => {
+        const token = getAccessToken();
+        if (!token) {
+          setAlerts([]);
+          return;
+        }
+
+        void clearAlertsHistory(token)
+          .then(() => {
+            setAlerts([]);
+          })
+          .catch((error) => {
+            if (isTokenError(error)) {
+              clearAuthSession();
+              setModalState({
+                isOpen: true,
+                title: 'Session Expired',
+                message: 'Your login session expired. Please log in again.',
+              });
+              window.setTimeout(() => {
+                window.location.href = '/login';
+              }, 300);
+              return;
+            }
+
+            showWarning(error instanceof Error ? error.message : 'Failed to clear alert history.');
+          });
+      },
+    });
   };
 
   const hasFaceBox = isStreaming ? trackedFaceBox !== null : recognitionResult?.face_box != null;
@@ -1495,15 +1847,33 @@ export function MonitoringPage() {
                   </div>
                   <div className="shrink-0">
                     {hasEvidencePreview(alert) ? (
-                      <div className="w-16 h-16 rounded-lg overflow-hidden border-2 border-[#d4cbb7]">
-                        <img
-                          src={alert.imageUrl}
-                          alt="Detected event"
-                          className="w-full h-full object-cover"
-                        />
+                      <div className="flex flex-col items-end gap-2">
+                        <div className="w-16 h-16 rounded-lg overflow-hidden border-2 border-[#d4cbb7]">
+                          <img
+                            src={alert.imageUrl}
+                            alt="Detected event"
+                            className="w-full h-full object-cover"
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => promptDeleteMonitoringAlert(alert)}
+                          className="rounded-full border border-[#d4bfa7] bg-white px-3 py-1.5 text-xs text-[#8b4a32] shadow-sm transition-colors hover:bg-[#fff3e6]"
+                        >
+                          Delete
+                        </button>
                       </div>
                     ) : (
-                      <span className="text-xs text-[#8b7355]">No image</span>
+                      <div className="flex flex-col items-end gap-2">
+                        <span className="text-xs text-[#8b7355]">No image</span>
+                        <button
+                          type="button"
+                          onClick={() => promptDeleteMonitoringAlert(alert)}
+                          className="rounded-full border border-[#d4bfa7] bg-white px-3 py-1.5 text-xs text-[#8b4a32] shadow-sm transition-colors hover:bg-[#fff3e6]"
+                        >
+                          Delete
+                        </button>
+                      </div>
                     )}
                   </div>
                 </div>
@@ -1645,10 +2015,11 @@ export function MonitoringPage() {
                   <div className="flex gap-4">
                     <button
                       onClick={handleSave}
-                      className="flex items-center gap-2 bg-[#ff8c42] text-white px-6 py-3 rounded-full shadow-md hover:bg-[#ff7a2e] transition-colors"
+                      disabled={isSavingReport}
+                      className="flex items-center gap-2 bg-[#ff8c42] text-white px-6 py-3 rounded-full shadow-md transition-colors hover:bg-[#ff7a2e] disabled:cursor-not-allowed disabled:opacity-70"
                     >
                       <Save className="w-5 h-5" />
-                      Save
+                      {isSavingReport ? 'Saving...' : 'Save Session Report'}
                     </button>
                     <button
                       onClick={handleExitClick}
@@ -1664,7 +2035,16 @@ export function MonitoringPage() {
             </div>
 
             <div className="bg-white rounded-3xl shadow-xl p-6 border border-[#d4cbb7] space-y-4">
-              <h2 className="font-serif text-2xl text-[#4a3c2a]">Real-Time Monitoring Feed</h2>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <h2 className="font-serif text-2xl text-[#4a3c2a]">Real-Time Monitoring Feed</h2>
+                <button
+                  type="button"
+                  onClick={promptClearMonitoringAlerts}
+                  className="rounded-full border border-[#d4bfa7] bg-white px-4 py-2 text-sm text-[#8b4a32] shadow-sm transition-colors hover:bg-[#fff3e6]"
+                >
+                  Clear History
+                </button>
+              </div>
               {alerts.length === 0 ? (
                 <div className="rounded-2xl border border-[#d4cbb7] bg-[#f9f6f0] p-6 text-center text-[#6b5d4f] text-sm">
                   Start the camera to begin live PPE, fall, fire/smoke, and face recognition monitoring.
@@ -1711,6 +2091,17 @@ export function MonitoringPage() {
         onConfirm={handleExitConfirm}
         title="Warning!"
         message="Are you sure you want to exit monitoring?"
+      />
+      <WarningConfirmModal
+        isOpen={alertConfirmState.isOpen}
+        onCancel={() => setAlertConfirmState({ isOpen: false, title: '', message: '', onConfirm: null })}
+        onConfirm={() => {
+          const action = alertConfirmState.onConfirm;
+          setAlertConfirmState({ isOpen: false, title: '', message: '', onConfirm: null });
+          action?.();
+        }}
+        title={alertConfirmState.title}
+        message={alertConfirmState.message}
       />
 
       <Footer />

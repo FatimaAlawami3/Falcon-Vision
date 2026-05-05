@@ -270,7 +270,7 @@ class PPEService:
         try:
             # If regulation_repository is available, get rules from the latest regulation file only
             if self.regulation_repository:
-                latest_regulation = await self.regulation_repository.get_latest_regulation(organization_id)
+                latest_regulation = await self.regulation_repository.get_current_regulation(organization_id)
 
                 if latest_regulation:
                     # Get rules only from the latest regulation file

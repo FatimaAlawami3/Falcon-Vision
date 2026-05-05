@@ -118,6 +118,40 @@ class ExtractedRuleRepository(BaseRepository):
         )
         return int(result.modified_count)
 
+    async def set_rule_status_by_regulation(self, regulation_id: str | ObjectId, status: EntityStatus, *, updated_by) -> int:
+        regulation_object_id = regulation_id if isinstance(regulation_id, ObjectId) else validate_object_id(regulation_id)
+        result = await self.collection.update_many(
+            {
+                "regulation_id": regulation_object_id,
+                "is_deleted": {"$ne": True},
+            },
+            {
+                "$set": {
+                    "status": status,
+                    "updated_at": utc_now(),
+                    "updated_by": updated_by,
+                }
+            },
+        )
+        return int(result.modified_count)
+
+    async def deactivate_rules_by_organization(self, organization_id: str | ObjectId, *, updated_by) -> int:
+        result = await self.collection.update_many(
+            {
+                "organization_id": organization_id if isinstance(organization_id, ObjectId) else validate_object_id(organization_id),
+                "status": EntityStatus.ACTIVE,
+                "is_deleted": {"$ne": True},
+            },
+            {
+                "$set": {
+                    "status": EntityStatus.INACTIVE,
+                    "updated_at": utc_now(),
+                    "updated_by": updated_by,
+                }
+            },
+        )
+        return int(result.modified_count)
+
     async def get_rules_by_regulation(self, regulation_id: str | ObjectId) -> List[ExtractedRuleModel]:
         """Get all rules extracted from a specific regulation.
 

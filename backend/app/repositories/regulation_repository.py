@@ -1,7 +1,7 @@
 from bson import ObjectId
 from pymongo import ReturnDocument
 
-from app.core.constants import ExtractionStatus
+from app.core.constants import ExtractionStatus, RegulationStatus
 from app.models.regulation_model import RegulationModel
 from app.repositories.base_repository import BaseRepository
 from app.utils.datetime import utc_now
@@ -61,10 +61,77 @@ class RegulationRepository(BaseRepository):
             "is_deleted": {"$ne": True},
         }
 
+        doc = await self.collection.find_one(query, sort=[("version", -1), ("created_at", -1), ("updated_at", -1)])
+        if doc:
+            return RegulationModel(**doc)
+        return None
+
+    async def get_current_regulation(self, organization_id: str | ObjectId) -> RegulationModel | None:
+        query = {
+            "organization_id": organization_id if isinstance(organization_id, ObjectId) else ObjectId(organization_id),
+            "status": RegulationStatus.ACTIVE,
+            "is_deleted": {"$ne": True},
+        }
+
         doc = await self.collection.find_one(query, sort=[("updated_at", -1), ("created_at", -1)])
         if doc:
             return RegulationModel(**doc)
         return None
+
+    async def list_regulations(self, organization_id: str | ObjectId) -> list[RegulationModel]:
+        query = {
+            "organization_id": organization_id if isinstance(organization_id, ObjectId) else ObjectId(organization_id),
+            "is_deleted": {"$ne": True},
+        }
+
+        cursor = self.collection.find(query).sort(
+            [
+                ("status", 1),
+                ("version", -1),
+                ("updated_at", -1),
+                ("created_at", -1),
+            ]
+        )
+        regulations: list[RegulationModel] = []
+        async for doc in cursor:
+            regulations.append(RegulationModel(**doc))
+        return regulations
+
+    async def set_current_regulation(self, organization_id: str | ObjectId, regulation_id: str | ObjectId, *, updated_by) -> dict | None:
+        organization_object_id = organization_id if isinstance(organization_id, ObjectId) else ObjectId(organization_id)
+        regulation_object_id = regulation_id if isinstance(regulation_id, ObjectId) else ObjectId(regulation_id)
+        now = utc_now()
+
+        await self.collection.update_many(
+            {
+                "organization_id": organization_object_id,
+                "_id": {"$ne": regulation_object_id},
+                "is_deleted": {"$ne": True},
+            },
+            {
+                "$set": {
+                    "status": RegulationStatus.SUPERSEDED,
+                    "updated_at": now,
+                    "updated_by": updated_by,
+                }
+            },
+        )
+
+        return await self.collection.find_one_and_update(
+            {
+                "_id": regulation_object_id,
+                "organization_id": organization_object_id,
+                "is_deleted": {"$ne": True},
+            },
+            {
+                "$set": {
+                    "status": RegulationStatus.ACTIVE,
+                    "updated_at": now,
+                    "updated_by": updated_by,
+                }
+            },
+            return_document=ReturnDocument.AFTER,
+        )
 
     async def update_regulation(
         self,
