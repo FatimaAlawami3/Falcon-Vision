@@ -125,6 +125,26 @@ export function UploadRegulationPage() {
     }
   };
 
+  const withSavedRegulations = async (
+    response: RegulationCurrentResponse | RegulationUploadResponse,
+    token: string,
+  ): Promise<RegulationCurrentResponse> => {
+    const savedRegulations = await listRegulations(token).catch(() =>
+      mergeRegulationLists(
+        [...(currentRegulation?.regulations ?? []), ...(response.regulations ?? [])],
+        response.regulation,
+      ),
+    );
+
+    return {
+      ...response,
+      regulations: mergeRegulationLists(
+        [...(currentRegulation?.regulations ?? []), ...savedRegulations],
+        response.regulation,
+      ),
+    };
+  };
+
   useEffect(() => {
     void loadCurrentRegulation();
   }, []);
@@ -164,19 +184,7 @@ export function UploadRegulationPage() {
 
     try {
       const response = await uploadRegulation(selectedFile, token);
-      const savedRegulations = await listRegulations(token).catch(() =>
-        mergeRegulationLists(
-          [...(currentRegulation?.regulations ?? []), ...(response.regulations ?? [])],
-          response.regulation,
-        ),
-      );
-      applyCurrentRegulation({
-        ...response,
-        regulations: mergeRegulationLists(
-          [...(currentRegulation?.regulations ?? []), ...savedRegulations],
-          response.regulation,
-        ),
-      });
+      applyCurrentRegulation(await withSavedRegulations(response, token));
     } catch (error) {
       if (isTokenError(error)) {
         handleTokenExpiry();
@@ -260,7 +268,7 @@ export function UploadRegulationPage() {
     setIsExtracting(true);
     try {
       const response = await extractRegulation(currentRegulation.regulation.id, token);
-      applyCurrentRegulation(response);
+      applyCurrentRegulation(await withSavedRegulations(response, token));
     } catch (error) {
       if (isTokenError(error)) {
         handleTokenExpiry();
@@ -281,7 +289,7 @@ export function UploadRegulationPage() {
     setIsStoppingExtraction(true);
     try {
       const response = await cancelRegulationExtraction(currentRegulation.regulation.id, token);
-      applyCurrentRegulation(response);
+      applyCurrentRegulation(await withSavedRegulations(response, token));
     } catch (error) {
       if (isTokenError(error)) {
         handleTokenExpiry();
@@ -327,7 +335,7 @@ export function UploadRegulationPage() {
     try {
       const response = await activateRegulation(regulationId, token);
       setFile(null);
-      applyCurrentRegulation(response);
+      applyCurrentRegulation(await withSavedRegulations(response, token));
     } catch (error) {
       if (isTokenError(error)) {
         handleTokenExpiry();
