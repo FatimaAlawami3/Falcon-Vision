@@ -30,16 +30,24 @@ import {
 } from '../../lib/api';
 
 const TRACKING_MIN_INTERVAL_MS = 16;
-const TRACKING_SMOOTHING_FACTOR = 0.65;
-const TRACKING_BOX_MAX_AGE_MS = 120;
-const OVERLAY_TRACKING_SMOOTHING_FACTOR = 0.7;
-const TRACKED_OVERLAY_MAX_AGE_MS = 600;
-const OVERLAY_MATCH_DISTANCE_THRESHOLD = 0.35;
+const TRACKING_SMOOTHING_FACTOR = 0.7;
+const TRACKING_BOX_MAX_AGE_MS = 100;
+const OVERLAY_SMOOTHING_FACTOR = 0.65;
+const OVERLAY_MATCH_DISTANCE_THRESHOLD = 0.45;
+const OVERLAY_MATCH_IOU_THRESHOLD = 0.3;
+const OVERLAY_DUPLICATE_IOU_THRESHOLD = 0;
+const OVERLAY_DUPLICATE_CENTER_THRESHOLD = 0.18;
+const PPE_OVERLAY_MIN_CONFIDENCE = 0.45;
+const PPE_NEGATIVE_OVERLAY_MIN_CONFIDENCE = 0.6;
+const NO_GLOVES_OVERLAY_MIN_CONFIDENCE = 0.70;
 const DEFAULT_MONITORING_ZONE = 'production';
 const MAX_INFERENCE_FRAME_WIDTH = 640;
-const INFERENCE_JPEG_QUALITY = 0.65;
+const INFERENCE_JPEG_QUALITY = 0.5;
 const FRAME_LOOP_INTERVAL_MS = 40;
-const FACE_DETECTION_INTERVAL_MS = 140;
+const SAFETY_DETECTION_FRAME_SKIP = 2;
+const FACE_DETECTION_INTERVAL_MS = 1200;
+const HAZARD_DETECTION_INTERVAL_MS = 1200;
+const DETECTION_WARMUP_MS = 2000;
 
 type AlertRow = {
   id: string;
@@ -110,6 +118,55 @@ type CapturedVideoFrame = {
   height: number;
 };
 
+type SafetyModule = 'ppe' | 'fall' | 'fire';
+
+type PendingDetectionOverlay = Omit<
+  DetectionOverlay,
+  'targetX1' | 'targetY1' | 'targetX2' | 'targetY2' | 'lastSeenAt'
+>;
+
+function clampCoordinate(value: number, min: number, max: number) {
+  if (!Number.isFinite(value)) {
+    return min;
+  }
+
+  return Math.min(Math.max(value, min), max);
+}
+
+function normalizeDetectionBox(
+  bbox: number[],
+  sourceWidth: number,
+  sourceHeight: number,
+) {
+  const [rawX1 = 0, rawY1 = 0, rawX2 = 0, rawY2 = 0] = bbox;
+  const maxX = Math.max(sourceWidth, 0);
+  const maxY = Math.max(sourceHeight, 0);
+  const x1 = clampCoordinate(Math.min(rawX1, rawX2), 0, maxX);
+  const y1 = clampCoordinate(Math.min(rawY1, rawY2), 0, maxY);
+  const x2 = clampCoordinate(Math.max(rawX1, rawX2), 0, maxX);
+  const y2 = clampCoordinate(Math.max(rawY1, rawY2), 0, maxY);
+
+  return { x1, y1, x2, y2 };
+}
+
+function getPpeOverlayMinConfidence(className: string) {
+  const normalizedClassName = className.trim().toLowerCase();
+
+  if (normalizedClassName === 'no gloves') {
+    return NO_GLOVES_OVERLAY_MIN_CONFIDENCE;
+  }
+
+  if (normalizedClassName.startsWith('no ')) {
+    return PPE_NEGATIVE_OVERLAY_MIN_CONFIDENCE;
+  }
+
+  return PPE_OVERLAY_MIN_CONFIDENCE;
+}
+
+function shouldRenderPpeDetection(item: { class_name: string; confidence: number }) {
+  return item.confidence >= getPpeOverlayMinConfidence(item.class_name);
+}
+
 async function captureVideoFrame(
   video: HTMLVideoElement,
   canvas: HTMLCanvasElement,
@@ -148,6 +205,15 @@ async function captureVideoFrame(
         height: targetHeight,
       });
     }, 'image/jpeg', INFERENCE_JPEG_QUALITY);
+  });
+}
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(reader.error || new Error('Failed to read frame'));
+    reader.readAsDataURL(blob);
   });
 }
 
@@ -329,8 +395,77 @@ function getOverlayCenterDistance(a: DetectionOverlay, b: DetectionOverlay) {
   return diagonal > 0 ? distance / diagonal : Number.POSITIVE_INFINITY;
 }
 
+function getOverlayIntersectionRatio(a: DetectionOverlay, b: DetectionOverlay) {
+  const x1 = Math.max(a.targetX1, b.targetX1);
+  const y1 = Math.max(a.targetY1, b.targetY1);
+  const x2 = Math.min(a.targetX2, b.targetX2);
+  const y2 = Math.min(a.targetY2, b.targetY2);
+  const intersectionWidth = Math.max(0, x2 - x1);
+  const intersectionHeight = Math.max(0, y2 - y1);
+  const intersectionArea = intersectionWidth * intersectionHeight;
+  const areaA = Math.max(0, a.targetX2 - a.targetX1) * Math.max(0, a.targetY2 - a.targetY1);
+  const areaB = Math.max(0, b.targetX2 - b.targetX1) * Math.max(0, b.targetY2 - b.targetY1);
+  const unionArea = areaA + areaB - intersectionArea;
+
+  return unionArea > 0 ? intersectionArea / unionArea : 0;
+}
+
+function getPendingOverlayCenterDistance(a: PendingDetectionOverlay, b: PendingDetectionOverlay) {
+  const centerAX = (a.x1 + a.x2) / 2;
+  const centerAY = (a.y1 + a.y2) / 2;
+  const centerBX = (b.x1 + b.x2) / 2;
+  const centerBY = (b.y1 + b.y2) / 2;
+  const distance = Math.hypot(centerAX - centerBX, centerAY - centerBY);
+  const diagonal = Math.hypot(a.sourceWidth, a.sourceHeight);
+
+  return diagonal > 0 ? distance / diagonal : Number.POSITIVE_INFINITY;
+}
+
+function getPendingOverlayIntersectionRatio(a: PendingDetectionOverlay, b: PendingDetectionOverlay) {
+  const x1 = Math.max(a.x1, b.x1);
+  const y1 = Math.max(a.y1, b.y1);
+  const x2 = Math.min(a.x2, b.x2);
+  const y2 = Math.min(a.y2, b.y2);
+  const intersectionWidth = Math.max(0, x2 - x1);
+  const intersectionHeight = Math.max(0, y2 - y1);
+  const intersectionArea = intersectionWidth * intersectionHeight;
+  const areaA = Math.max(0, a.x2 - a.x1) * Math.max(0, a.y2 - a.y1);
+  const areaB = Math.max(0, b.x2 - b.x1) * Math.max(0, b.y2 - b.y1);
+  const unionArea = areaA + areaB - intersectionArea;
+
+  return unionArea > 0 ? intersectionArea / unionArea : 0;
+}
+
+function dedupeIncomingDetectionOverlays(overlays: PendingDetectionOverlay[]) {
+  const sortedOverlays = [...overlays].sort((a, b) => b.confidence - a.confidence);
+  const keptOverlays: PendingDetectionOverlay[] = [];
+
+  sortedOverlays.forEach((overlay) => {
+    const isDuplicate = keptOverlays.some((keptOverlay) => {
+      if (
+        keptOverlay.label !== overlay.label ||
+        keptOverlay.sourceWidth !== overlay.sourceWidth ||
+        keptOverlay.sourceHeight !== overlay.sourceHeight
+      ) {
+        return false;
+      }
+
+      return (
+        getPendingOverlayIntersectionRatio(keptOverlay, overlay) > OVERLAY_DUPLICATE_IOU_THRESHOLD ||
+        getPendingOverlayCenterDistance(keptOverlay, overlay) <= OVERLAY_DUPLICATE_CENTER_THRESHOLD
+      );
+    });
+
+    if (!isDuplicate) {
+      keptOverlays.push(overlay);
+    }
+  });
+
+  return keptOverlays;
+}
+
 function createTrackedOverlay(
-  overlay: Omit<DetectionOverlay, 'targetX1' | 'targetY1' | 'targetX2' | 'targetY2' | 'lastSeenAt'>,
+  overlay: PendingDetectionOverlay,
   now: number,
 ): DetectionOverlay {
   return {
@@ -345,12 +480,13 @@ function createTrackedOverlay(
 
 function reconcileDetectionOverlays(
   current: DetectionOverlay[],
-  incoming: Array<Omit<DetectionOverlay, 'targetX1' | 'targetY1' | 'targetX2' | 'targetY2' | 'lastSeenAt'>>,
+  incoming: PendingDetectionOverlay[],
   now: number,
 ) {
   const usedCurrentIndexes = new Set<number>();
+  const nextOverlays: DetectionOverlay[] = [];
 
-  return incoming.map((overlay, incomingIndex) => {
+  incoming.forEach((overlay, incomingIndex) => {
     const nextOverlay = createTrackedOverlay(overlay, now);
     let bestMatchIndex = -1;
     let bestMatchDistance = Number.POSITIVE_INFINITY;
@@ -369,7 +505,14 @@ function reconcileDetectionOverlays(
       }
 
       const distance = getOverlayCenterDistance(existing, nextOverlay);
-      if (distance < bestMatchDistance) {
+      const overlap = getOverlayIntersectionRatio(existing, nextOverlay);
+      if (overlap >= OVERLAY_MATCH_IOU_THRESHOLD && distance < bestMatchDistance) {
+        bestMatchDistance = distance;
+        bestMatchIndex = currentIndex;
+        return;
+      }
+
+      if (bestMatchIndex < 0 && distance < bestMatchDistance) {
         bestMatchDistance = distance;
         bestMatchIndex = currentIndex;
       }
@@ -378,23 +521,41 @@ function reconcileDetectionOverlays(
     if (bestMatchIndex >= 0 && bestMatchDistance <= OVERLAY_MATCH_DISTANCE_THRESHOLD) {
       usedCurrentIndexes.add(bestMatchIndex);
       const previous = current[bestMatchIndex];
-      return {
+      nextOverlays.push({
         ...previous,
-        id: nextOverlay.id || `${nextOverlay.label}-${incomingIndex}`,
+        id: previous.id || nextOverlay.id || `${nextOverlay.label}-${incomingIndex}`,
         confidence: nextOverlay.confidence,
         borderColor: nextOverlay.borderColor,
         badgeColor: nextOverlay.badgeColor,
+        x1: previous.x1 + (nextOverlay.x1 - previous.x1) * OVERLAY_SMOOTHING_FACTOR,
+        y1: previous.y1 + (nextOverlay.y1 - previous.y1) * OVERLAY_SMOOTHING_FACTOR,
+        x2: previous.x2 + (nextOverlay.x2 - previous.x2) * OVERLAY_SMOOTHING_FACTOR,
+        y2: previous.y2 + (nextOverlay.y2 - previous.y2) * OVERLAY_SMOOTHING_FACTOR,
         sourceWidth: nextOverlay.sourceWidth,
         sourceHeight: nextOverlay.sourceHeight,
-        targetX1: nextOverlay.targetX1,
-        targetY1: nextOverlay.targetY1,
-        targetX2: nextOverlay.targetX2,
-        targetY2: nextOverlay.targetY2,
+        targetX1: nextOverlay.x1,
+        targetY1: nextOverlay.y1,
+        targetX2: nextOverlay.x2,
+        targetY2: nextOverlay.y2,
         lastSeenAt: now,
-      };
+      });
+      return;
     }
 
-    return nextOverlay;
+    nextOverlays.push(nextOverlay);
+  });
+
+  return nextOverlays.filter((overlay, overlayIndex) => {
+    const newerDuplicateIndex = nextOverlays.findIndex(
+      (candidate, candidateIndex) =>
+        candidateIndex > overlayIndex &&
+        candidate.label === overlay.label &&
+        candidate.sourceWidth === overlay.sourceWidth &&
+        candidate.sourceHeight === overlay.sourceHeight &&
+        getOverlayIntersectionRatio(candidate, overlay) > OVERLAY_DUPLICATE_IOU_THRESHOLD,
+    );
+
+    return newerDuplicateIndex < 0;
   });
 }
 
@@ -693,8 +854,11 @@ export function MonitoringPage() {
   const lastTrackedFaceBoxRef = useRef<LocalFaceBox | null>(null);
   const lastTrackedFaceAtRef = useRef(0);
   const safetySocketRef = useRef<WebSocket | null>(null);
-  const latestSafetyFrameRef = useRef<CapturedVideoFrame | null>(null);
   const sessionStartedAtRef = useRef<string | null>(null);
+  const emptySafetyResultStreakRef = useRef(0);
+  const safetyRequestSentAtRef = useRef(0);
+  const safetyFrameSkipRef = useRef(0);
+  const detectionWarmupUntilRef = useRef(0);
   const detectorInFlightRef = useRef({
     face: false,
     safety: false,
@@ -702,13 +866,28 @@ export function MonitoringPage() {
   const lastDetectorRunAtRef = useRef({
     face: 0,
     safety: 0,
+    hazard: 0,
   });
 
   const attachStreamToVideo = async () => {
     const video = videoRef.current;
     const stream = streamRef.current;
 
-    if (!video || !stream) {
+    if (!video) {
+      return;
+    }
+
+    if (!stream) {
+      if (!video.src) {
+        return;
+      }
+
+      try {
+        await video.play();
+        setHasLiveVideo(video.videoWidth > 0 && video.videoHeight > 0);
+      } catch {
+        // Playback can fail briefly until metadata is ready.
+      }
       return;
     }
 
@@ -856,6 +1035,9 @@ export function MonitoringPage() {
 
     if (videoRef.current) {
       videoRef.current.srcObject = null;
+      videoRef.current.pause();
+      videoRef.current.removeAttribute('src');
+      videoRef.current.load();
     }
 
     setHasLiveVideo(false);
@@ -872,8 +1054,12 @@ export function MonitoringPage() {
     lastDetectorRunAtRef.current = {
       face: 0,
       safety: 0,
+      hazard: 0,
     };
-    latestSafetyFrameRef.current = null;
+    emptySafetyResultStreakRef.current = 0;
+    safetyRequestSentAtRef.current = 0;
+    safetyFrameSkipRef.current = 0;
+    detectionWarmupUntilRef.current = 0;
     safetySocketRef.current?.close();
     safetySocketRef.current = null;
 
@@ -1051,44 +1237,15 @@ export function MonitoringPage() {
     };
   }, [isStreaming, hasLiveVideo]);
 
+  // Handle face recognition overlays
   useEffect(() => {
-    if (!isStreaming) {
+    if (isStreaming) {
+      setDetectionOverlays((current) =>
+        current.filter((overlay) => overlay.id !== 'face-recognition')
+      );
       return;
     }
 
-    let animationFrameId: number | null = null;
-
-    const animateOverlays = () => {
-      const now = performance.now();
-
-      setDetectionOverlays((current) => {
-        const next = current
-          .filter((overlay) => now - overlay.lastSeenAt <= TRACKED_OVERLAY_MAX_AGE_MS)
-          .map((overlay) => ({
-            ...overlay,
-            x1: overlay.x1 + (overlay.targetX1 - overlay.x1) * OVERLAY_TRACKING_SMOOTHING_FACTOR,
-            y1: overlay.y1 + (overlay.targetY1 - overlay.y1) * OVERLAY_TRACKING_SMOOTHING_FACTOR,
-            x2: overlay.x2 + (overlay.targetX2 - overlay.x2) * OVERLAY_TRACKING_SMOOTHING_FACTOR,
-            y2: overlay.y2 + (overlay.targetY2 - overlay.y2) * OVERLAY_TRACKING_SMOOTHING_FACTOR,
-          }));
-
-        return next;
-      });
-
-      animationFrameId = window.requestAnimationFrame(animateOverlays);
-    };
-
-    animationFrameId = window.requestAnimationFrame(animateOverlays);
-
-    return () => {
-      if (animationFrameId !== null) {
-        window.cancelAnimationFrame(animationFrameId);
-      }
-    };
-  }, [isStreaming]);
-
-  // Handle face recognition overlays
-  useEffect(() => {
     if (!recognitionResult || !recognitionResult.face_box || recognitionResult.status === 'no_face') {
       // Remove face recognition overlay if no face or no result
       setDetectionOverlays((current) =>
@@ -1123,7 +1280,7 @@ export function MonitoringPage() {
       // Add the new face recognition overlay
       return [...withoutFace, faceOverlay];
     });
-  }, [recognitionResult]);
+  }, [isStreaming, recognitionResult]);
 
   useEffect(() => {
     if (!isStreaming) {
@@ -1184,65 +1341,87 @@ export function MonitoringPage() {
       const now = performance.now();
       const frameWidth = typeof safetyResult.frame_width === 'number' ? safetyResult.frame_width : MAX_INFERENCE_FRAME_WIDTH;
       const frameHeight = typeof safetyResult.frame_height === 'number' ? safetyResult.frame_height : Math.round(MAX_INFERENCE_FRAME_WIDTH * 9 / 16);
+      const renderablePpeItems = safetyResult.ppe.detected_items.filter(shouldRenderPpeDetection);
+      const hasDetections =
+        renderablePpeItems.length > 0 ||
+        safetyResult.fall.detections.length > 0 ||
+        safetyResult.fire.detections.length > 0;
+      emptySafetyResultStreakRef.current = hasDetections ? 0 : emptySafetyResultStreakRef.current + 1;
 
-      setPpeResult(safetyResult.ppe);
-      setFallResult(safetyResult.fall);
-      setFireResult(safetyResult.fire);
+      setPpeResult((current) =>
+        renderablePpeItems.length > 0 || !current
+          ? { ...safetyResult.ppe, detected_items: renderablePpeItems }
+          : current
+      );
+      setFallResult((current) =>
+        safetyResult.fall.detections.length > 0 || !current ? safetyResult.fall : current
+      );
+      setFireResult((current) =>
+        safetyResult.fire.detections.length > 0 || !current ? safetyResult.fire : current
+      );
 
-      const nextOverlays = [
-        ...safetyResult.ppe.detected_items.map((item, index) => {
+      const nextOverlays = dedupeIncomingDetectionOverlays([
+        ...renderablePpeItems.map((item, index) => {
           const palette = getOverlayPalette(item.class_name);
+          const sourceWidth = safetyResult.ppe.image_width || frameWidth;
+          const sourceHeight = safetyResult.ppe.image_height || frameHeight;
+          const box = normalizeDetectionBox(item.bbox, sourceWidth, sourceHeight);
           return {
             id: `ppe-${index}-${item.class_name}`,
             label: item.class_name,
             confidence: item.confidence,
             borderColor: palette.borderColor,
             badgeColor: palette.badgeColor,
-            x1: item.bbox[0],
-            y1: item.bbox[1],
-            x2: item.bbox[2],
-            y2: item.bbox[3],
-            sourceWidth: safetyResult.ppe.image_width,
-            sourceHeight: safetyResult.ppe.image_height,
+            x1: box.x1,
+            y1: box.y1,
+            x2: box.x2,
+            y2: box.y2,
+            sourceWidth,
+            sourceHeight,
           };
         }),
         ...safetyResult.fall.detections
           .filter((item) => item.is_fallen)
           .map((item, index) => {
             const palette = getOverlayPalette('Fall detected');
+            const box = normalizeDetectionBox(item.bbox, frameWidth, frameHeight);
             return {
               id: `fall-${index}-${item.person_id}`,
               label: 'Fall detected',
               confidence: item.confidence,
               borderColor: palette.borderColor,
               badgeColor: palette.badgeColor,
-              x1: item.bbox[0],
-              y1: item.bbox[1],
-              x2: item.bbox[2],
-              y2: item.bbox[3],
+              x1: box.x1,
+              y1: box.y1,
+              x2: box.x2,
+              y2: box.y2,
               sourceWidth: frameWidth,
               sourceHeight: frameHeight,
             };
           }),
         ...safetyResult.fire.detections.map((item, index) => {
           const palette = getOverlayPalette(item.class);
+          const box = normalizeDetectionBox(item.bbox, frameWidth, frameHeight);
           return {
             id: `fire-${index}-${item.class}`,
             label: item.class,
             confidence: item.confidence,
             borderColor: palette.borderColor,
             badgeColor: palette.badgeColor,
-            x1: item.bbox[0],
-            y1: item.bbox[1],
-            x2: item.bbox[2],
-            y2: item.bbox[3],
+            x1: box.x1,
+            y1: box.y1,
+            x2: box.x2,
+            y2: box.y2,
             sourceWidth: frameWidth,
             sourceHeight: frameHeight,
           };
         }),
-      ];
+      ]);
 
-      setDetectionOverlays((current) => reconcileDetectionOverlays(current, nextOverlays, now));
+      setDetectionOverlays((current) => {
+        const nextTracked = reconcileDetectionOverlays(current, nextOverlays, now);
+        return hasDetections ? nextTracked : [];
+      });
 
       if (Array.isArray(safetyResult.alerts) && safetyResult.alerts.length > 0) {
         setAlerts((current) => {
@@ -1260,7 +1439,7 @@ export function MonitoringPage() {
         });
       }
 
-      setHeadCount(safetyResult.fall.people_count);
+      setHeadCount((current) => (safetyResult.fall.people_count > 0 ? safetyResult.fall.people_count : current));
     };
 
     const runFaceRecognition = async (capturedFrame: CapturedVideoFrame) => {
@@ -1370,17 +1549,6 @@ export function MonitoringPage() {
       socket.binaryType = 'arraybuffer';
       safetySocketRef.current = socket;
 
-      const dispatchLatestSafetyFrame = () => {
-        const latestFrame = latestSafetyFrameRef.current;
-        if (!latestFrame || detectorInFlightRef.current.safety) {
-          return;
-        }
-
-        detectorInFlightRef.current.safety = true;
-        updateRecognizingState();
-        void runSafetyDetection(latestFrame);
-      };
-
       socket.onmessage = (event) => {
         if (isCancelled) {
           return;
@@ -1411,7 +1579,6 @@ export function MonitoringPage() {
         } finally {
           detectorInFlightRef.current.safety = false;
           updateRecognizingState();
-          dispatchLatestSafetyFrame();
         }
       };
 
@@ -1435,7 +1602,7 @@ export function MonitoringPage() {
       };
     };
 
-    const runSafetyDetection = async (capturedFrame: CapturedVideoFrame) => {
+    const runSafetyDetection = async (capturedFrame: CapturedVideoFrame, modules: SafetyModule[]) => {
       detectorInFlightRef.current.safety = true;
       updateRecognizingState();
 
@@ -1447,7 +1614,20 @@ export function MonitoringPage() {
           return;
         }
 
-        socket.send(capturedFrame.blob);
+        const image = await blobToDataUrl(capturedFrame.blob);
+        if (isCancelled) {
+          return;
+        }
+
+        socket.send(JSON.stringify({
+          type: 'frame',
+          image,
+          frame_width: capturedFrame.width,
+          frame_height: capturedFrame.height,
+          zone_type: DEFAULT_MONITORING_ZONE,
+          modules,
+        }));
+        safetyRequestSentAtRef.current = performance.now();
       } catch (error) {
         console.error('Safety monitoring failed:', error);
         detectorInFlightRef.current.safety = false;
@@ -1467,34 +1647,65 @@ export function MonitoringPage() {
         return;
       }
 
+      const now = performance.now();
+      const isDetectionWarmingUp = now < detectionWarmupUntilRef.current;
+      const shouldRunFaceRecognition =
+        !isDetectionWarmingUp &&
+        isFaceRecognitionActive &&
+        !detectorInFlightRef.current.face &&
+        now - lastDetectorRunAtRef.current.face >= FACE_DETECTION_INTERVAL_MS;
+      const isSafetyFrameEligible =
+        !isDetectionWarmingUp &&
+        safetySocketRef.current?.readyState === WebSocket.OPEN &&
+        !detectorInFlightRef.current.safety &&
+        now - lastDetectorRunAtRef.current.safety >= FRAME_LOOP_INTERVAL_MS;
+      const shouldRunSafetyDetection =
+        isSafetyFrameEligible &&
+        safetyFrameSkipRef.current % SAFETY_DETECTION_FRAME_SKIP === 0;
+
+      if (isDetectionWarmingUp) {
+        scheduleNextLoop(Math.min(120, detectionWarmupUntilRef.current - now));
+        return;
+      }
+
+      if (isSafetyFrameEligible) {
+        safetyFrameSkipRef.current = (safetyFrameSkipRef.current + 1) % SAFETY_DETECTION_FRAME_SKIP;
+
+        if (!shouldRunSafetyDetection) {
+          lastDetectorRunAtRef.current.safety = now;
+        }
+      }
+
+      if (!shouldRunFaceRecognition && !shouldRunSafetyDetection) {
+        scheduleNextLoop();
+        return;
+      }
+
       const capturedFrame = await captureVideoFrame(video, canvas);
       if (!capturedFrame) {
         scheduleNextLoop();
         return;
       }
 
-      latestSafetyFrameRef.current = capturedFrame;
-
-      const now = performance.now();
-
-      if (
-        isFaceRecognitionActive &&
-        !detectorInFlightRef.current.face &&
-        now - lastDetectorRunAtRef.current.face >= FACE_DETECTION_INTERVAL_MS
-      ) {
+      if (shouldRunFaceRecognition) {
         lastDetectorRunAtRef.current.face = now;
         void runFaceRecognition(capturedFrame);
       }
 
-      if (
-        safetySocketRef.current &&
-        !detectorInFlightRef.current.safety &&
-        now - lastDetectorRunAtRef.current.safety >= FRAME_LOOP_INTERVAL_MS
-      ) {
+      if (shouldRunSafetyDetection) {
+        const shouldRunHazards = now - lastDetectorRunAtRef.current.hazard >= HAZARD_DETECTION_INTERVAL_MS;
+        const safetyModules: SafetyModule[] = shouldRunHazards
+          ? ['ppe', 'fall', 'fire']
+          : ['ppe'];
+
+        if (shouldRunHazards) {
+          lastDetectorRunAtRef.current.hazard = now;
+        }
+
         lastDetectorRunAtRef.current.safety = now;
         detectorInFlightRef.current.safety = true;
         updateRecognizingState();
-        void runSafetyDetection(capturedFrame);
+        void runSafetyDetection(capturedFrame, safetyModules);
       }
 
       scheduleNextLoop();
@@ -1523,16 +1734,21 @@ export function MonitoringPage() {
       return;
     }
 
-    if (!navigator.mediaDevices?.getUserMedia) {
-      setModalState({
-        isOpen: true,
-        title: 'Camera Unsupported',
-        message: 'Your browser does not support webcam access for live monitoring.',
-      });
-      return;
-    }
-
     try {
+      const video = videoRef.current;
+      if (!video) {
+        return;
+      }
+
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setModalState({
+          isOpen: true,
+          title: 'Camera Unsupported',
+          message: 'Your browser does not support webcam access for live monitoring.',
+        });
+        return;
+      }
+
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: 'user',
@@ -1563,6 +1779,11 @@ export function MonitoringPage() {
       }
 
       streamRef.current = stream;
+      video.removeAttribute('src');
+      video.srcObject = stream;
+      video.loop = false;
+      video.muted = true;
+      video.playsInline = true;
 
       setRecognitionResult(null);
       setHasLiveVideo(false);
@@ -1575,6 +1796,13 @@ export function MonitoringPage() {
       const nextSessionStartedAt = new Date().toISOString();
       setSessionStartedAt(nextSessionStartedAt);
       sessionStartedAtRef.current = nextSessionStartedAt;
+      detectionWarmupUntilRef.current = performance.now() + DETECTION_WARMUP_MS;
+      lastDetectorRunAtRef.current = {
+        face: detectionWarmupUntilRef.current - FACE_DETECTION_INTERVAL_MS,
+        safety: detectionWarmupUntilRef.current - FRAME_LOOP_INTERVAL_MS,
+        hazard: detectionWarmupUntilRef.current - HAZARD_DETECTION_INTERVAL_MS,
+      };
+      safetyFrameSkipRef.current = 0;
       lastAlertSignatureRef.current = {
         face: '',
         ppe: '',
@@ -1587,8 +1815,19 @@ export function MonitoringPage() {
             fastMode: true,
           })
         : null;
-      setCameraMessage('Camera is live and monitoring is running.');
+      setCameraMessage('Camera is live. Detection will start after the stream stabilizes.');
       setIsStreaming(true);
+      window.setTimeout(() => {
+        if (detectionWarmupUntilRef.current > 0) {
+          setCameraMessage('Camera is live and monitoring is running.');
+        }
+      }, DETECTION_WARMUP_MS);
+
+      try {
+        await video.play();
+      } catch {
+        // The ready-state effect will retry playback when the video metadata is available.
+      }
     } catch (error) {
       setModalState({
         isOpen: true,
@@ -1928,7 +2167,7 @@ export function MonitoringPage() {
                     autoPlay
                     muted
                     playsInline
-                    className={`w-full h-full object-contain transition-opacity ${
+                    className={`h-full w-full object-contain transition-opacity ${
                       hasLiveVideo ? 'opacity-100' : 'opacity-0'
                     }`}
                   />
@@ -1963,10 +2202,12 @@ export function MonitoringPage() {
                     return (
                       <div key={overlay.id} className="absolute inset-0 pointer-events-none">
                         <div
-                          className="absolute rounded-xl border-[3px]"
+                          className="absolute rounded-sm border-[3px]"
                           style={{
                             ...overlayStyle,
                             borderColor: overlay.borderColor,
+                            transition: 'none',
+                            willChange: 'left, top, width, height',
                           }}
                         >
                           <div
@@ -1986,7 +2227,7 @@ export function MonitoringPage() {
                   {isStreaming && hasLiveVideo && localFaceBoxStyle && (
                     <div className="absolute inset-0 pointer-events-none">
                       <div
-                        className="absolute rounded-xl border-[3px] border-[#f59e0b]"
+                        className="absolute rounded-sm border-[3px] border-[#f59e0b]"
                         style={localFaceBoxStyle}
                       >
                         <div className="absolute left-0 -top-3 -translate-y-full rounded-full bg-[#b45309] px-3 py-1 text-sm font-semibold whitespace-nowrap text-white">

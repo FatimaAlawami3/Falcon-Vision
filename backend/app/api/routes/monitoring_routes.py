@@ -201,8 +201,10 @@ async def _run_safety_detection(
     alert_service: AlertService,
     current_user: dict,
     zone_type: str | None,
+    enabled_modules: set[str] | None = None,
 ) -> dict:
     organization_id = current_user.get("organization_id") if current_user else None
+    modules = enabled_modules or {"ppe", "fall", "fire"}
 
     ppe_file = _clone_upload_file(file_bytes, filename, content_type)
     fall_file = _clone_upload_file(file_bytes, filename, content_type)
@@ -211,10 +213,10 @@ async def _run_safety_detection(
     required_ppe = await ppe_service.get_live_required_ppe(organization_id) if organization_id else []
 
     safety_tasks = []
-    if required_ppe:
+    if "ppe" in modules and required_ppe:
         safety_tasks.append(("ppe", ppe_service.detect_ppe(ppe_file, current_user)))
-    safety_tasks.extend(
-        [
+    if "fall" in modules:
+        safety_tasks.append(
             (
                 "fall",
                 fall_service.detect_falls(
@@ -222,7 +224,10 @@ async def _run_safety_detection(
                     zone_type=effective_zone_type,
                     organization_id=organization_id,
                 ),
-            ),
+            )
+        )
+    if "fire" in modules:
+        safety_tasks.append(
             (
                 "fire",
                 fire_service.detect_fire_image_only(
@@ -230,9 +235,8 @@ async def _run_safety_detection(
                     zone_type=effective_zone_type,
                     organization_id=organization_id,
                 ),
-            ),
-        ]
-    )
+            )
+        )
 
     safety_results = await asyncio.gather(
         *(task for _module, task in safety_tasks),
@@ -247,7 +251,17 @@ async def _run_safety_detection(
     fall_detection_result = results_by_module.get("fall")
     fire_detection_result = results_by_module.get("fire")
 
-    if not required_ppe:
+    if "ppe" not in modules:
+        ppe_detection = {
+            "status": "skipped",
+            "violations": [],
+            "detected_items": [],
+            "image_width": 0,
+            "image_height": 0,
+        }
+        filtered_ppe_items = []
+        ppe_violations = []
+    elif not required_ppe:
         ppe_detection = {
             "status": "inactive",
             "violations": [],
@@ -277,12 +291,16 @@ async def _run_safety_detection(
             "image_height": ppe_detection_result.image_height,
         }
 
-    if isinstance(fall_detection_result, Exception):
+    if "fall" not in modules:
+        fall_detection = _empty_fall_result("Skipped for this frame", effective_zone_type)
+    elif isinstance(fall_detection_result, Exception):
         fall_detection = _empty_fall_result(str(fall_detection_result), effective_zone_type)
     else:
         fall_detection = fall_detection_result
 
-    if isinstance(fire_detection_result, Exception):
+    if "fire" not in modules:
+        fire_detection = _empty_fire_result("Skipped for this frame", effective_zone_type)
+    elif isinstance(fire_detection_result, Exception):
         fire_detection = _empty_fire_result(str(fire_detection_result), effective_zone_type)
     else:
         fire_detection = fire_detection_result
@@ -361,6 +379,7 @@ async def _run_safety_detection_from_ndarray(
     alert_service: AlertService,
     current_user: dict,
     zone_type: str | None,
+    enabled_modules: set[str] | None = None,
 ) -> dict:
     success, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 70])
     if not success:
@@ -376,6 +395,7 @@ async def _run_safety_detection_from_ndarray(
         alert_service=alert_service,
         current_user=current_user,
         zone_type=zone_type,
+        enabled_modules=enabled_modules,
     )
 
 
@@ -577,6 +597,7 @@ async def monitoring_safety_websocket(
             zone_type = DEFAULT_MONITORING_ZONE
             frame_width: int | None = None
             frame_height: int | None = None
+            enabled_modules: set[str] | None = None
 
             if message.get("bytes") is not None:
                 file_bytes = message["bytes"]
@@ -602,6 +623,13 @@ async def monitoring_safety_websocket(
                 zone_type = payload.get("zone_type") or DEFAULT_MONITORING_ZONE
                 frame_width = payload.get("frame_width")
                 frame_height = payload.get("frame_height")
+                payload_modules = payload.get("modules")
+                if isinstance(payload_modules, list):
+                    enabled_modules = {
+                        str(module).strip().lower()
+                        for module in payload_modules
+                        if str(module).strip().lower() in {"ppe", "fall", "fire"}
+                    }
             else:
                 continue
 
@@ -627,6 +655,7 @@ async def monitoring_safety_websocket(
                 alert_service=alert_service,
                 current_user=current_user,
                 zone_type=zone_type,
+                enabled_modules=enabled_modules,
             )
             await websocket.send_json(
                 {
