@@ -26,7 +26,7 @@ import {
   type MonitoringSessionReportDocument,
   saveMonitoringSessionReport,
   resolveStorageUrl,
-  recognizeEmployeeFace,
+  recognizeEmployeeFaces,
 } from '../../lib/api';
 
 const TRACKING_MIN_INTERVAL_MS = 16;
@@ -831,6 +831,7 @@ export function MonitoringPage() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [isRecognizing, setIsRecognizing] = useState(false);
   const [recognitionResult, setRecognitionResult] = useState<FaceRecognitionResponse | null>(null);
+  const [recognitionResults, setRecognitionResults] = useState<FaceRecognitionResponse[]>([]);
   const [ppeResult, setPpeResult] = useState<LivePPEResult | null>(null);
   const [fallResult, setFallResult] = useState<FallDetectionResponse | null>(null);
   const [fireResult, setFireResult] = useState<FireDetectionResponse | null>(null);
@@ -839,6 +840,7 @@ export function MonitoringPage() {
   const [trackedFaceBox, setTrackedFaceBox] = useState<LocalFaceBox | null>(null);
   const [isLocalTrackingEnabled, setIsLocalTrackingEnabled] = useState(false);
   const [isFaceRecognitionActive, setIsFaceRecognitionActive] = useState(true);
+  const [activeSafetyModules, setActiveSafetyModules] = useState<SafetyModule[]>(['ppe', 'fall', 'fire']);
   const [alerts, setAlerts] = useState<AlertRow[]>([]);
   const [detectionOverlays, setDetectionOverlays] = useState<DetectionOverlay[]>([]);
   const [sessionStartedAt, setSessionStartedAt] = useState<string | null>(null);
@@ -1066,6 +1068,7 @@ export function MonitoringPage() {
     if (!preserveSessionData) {
       setIsFaceRecognitionActive(true);
       setRecognitionResult(null);
+      setRecognitionResults([]);
       setPpeResult(null);
       setFallResult(null);
       setFireResult(null);
@@ -1239,48 +1242,45 @@ export function MonitoringPage() {
 
   // Handle face recognition overlays
   useEffect(() => {
-    if (isStreaming) {
-      setDetectionOverlays((current) =>
-        current.filter((overlay) => overlay.id !== 'face-recognition')
-      );
-      return;
-    }
+    const visibleFaceResults = recognitionResults.filter(
+      (result) => result.face_box && result.status !== 'no_face',
+    );
 
-    if (!recognitionResult || !recognitionResult.face_box || recognitionResult.status === 'no_face') {
+    if (visibleFaceResults.length === 0) {
       // Remove face recognition overlay if no face or no result
       setDetectionOverlays((current) =>
-        current.filter((overlay) => overlay.id !== 'face-recognition')
+        current.filter((overlay) => !overlay.id.startsWith('face-recognition'))
       );
       return;
     }
 
     const now = performance.now();
-    const faceOverlay = {
-      id: 'face-recognition',
-      label: getFaceOverlayLabel(recognitionResult),
-      confidence: recognitionResult.score || undefined,
-      borderColor: recognitionResult.authorized ? '#10b981' : '#ef4444', // green for authorized, red for unauthorized
-      badgeColor: recognitionResult.authorized ? '#10b981' : '#ef4444',
-      x1: recognitionResult.face_box.x1,
-      y1: recognitionResult.face_box.y1,
-      x2: recognitionResult.face_box.x2,
-      y2: recognitionResult.face_box.y2,
-      sourceWidth: recognitionResult.face_box.image_width,
-      sourceHeight: recognitionResult.face_box.image_height,
-      targetX1: recognitionResult.face_box.x1,
-      targetY1: recognitionResult.face_box.y1,
-      targetX2: recognitionResult.face_box.x2,
-      targetY2: recognitionResult.face_box.y2,
+    const faceOverlays = visibleFaceResults.map((result, index) => ({
+      id: `face-recognition-${index}`,
+      label: getFaceOverlayLabel(result),
+      confidence: result.score || undefined,
+      borderColor: result.authorized ? '#10b981' : '#ef4444',
+      badgeColor: result.authorized ? '#10b981' : '#ef4444',
+      x1: result.face_box!.x1,
+      y1: result.face_box!.y1,
+      x2: result.face_box!.x2,
+      y2: result.face_box!.y2,
+      sourceWidth: result.face_box!.image_width,
+      sourceHeight: result.face_box!.image_height,
+      targetX1: result.face_box!.x1,
+      targetY1: result.face_box!.y1,
+      targetX2: result.face_box!.x2,
+      targetY2: result.face_box!.y2,
       lastSeenAt: now,
-    };
+    }));
 
     setDetectionOverlays((current) => {
       // Remove any existing face recognition overlay
-      const withoutFace = current.filter((overlay) => overlay.id !== 'face-recognition');
+      const withoutFace = current.filter((overlay) => !overlay.id.startsWith('face-recognition'));
       // Add the new face recognition overlay
-      return [...withoutFace, faceOverlay];
+      return [...withoutFace, ...faceOverlays];
     });
-  }, [isStreaming, recognitionResult]);
+  }, [recognitionResults]);
 
   useEffect(() => {
     if (!isStreaming) {
@@ -1440,6 +1440,35 @@ export function MonitoringPage() {
       }
 
       setHeadCount((current) => (safetyResult.fall.people_count > 0 ? safetyResult.fall.people_count : current));
+      setActiveSafetyModules((currentModules) => {
+        const nextModules = new Set(currentModules);
+        const fallDetail = (safetyResult.fall as FallDetectionResponse & { detail?: string }).detail;
+        const fireWasSkipped = safetyResult.fire.reason === 'Skipped for this frame';
+
+        if (safetyResult.ppe.status === 'clear' || safetyResult.ppe.status === 'violation') {
+          nextModules.add('ppe');
+        } else if (safetyResult.ppe.status === 'inactive' || safetyResult.ppe.status === 'skipped') {
+          nextModules.delete('ppe');
+        }
+
+        if (fallDetail !== 'Skipped for this frame') {
+          if (safetyResult.fall.fall_detection_active) {
+            nextModules.add('fall');
+          } else {
+            nextModules.delete('fall');
+          }
+        }
+
+        if (!fireWasSkipped) {
+          if (safetyResult.fire.fire_detection_active) {
+            nextModules.add('fire');
+          } else {
+            nextModules.delete('fire');
+          }
+        }
+
+        return Array.from(nextModules);
+      });
     };
 
     const runFaceRecognition = async (capturedFrame: CapturedVideoFrame) => {
@@ -1447,74 +1476,54 @@ export function MonitoringPage() {
       updateRecognizingState();
 
       try {
-        const result = await recognizeEmployeeFace(capturedFrame.blob, token);
+        const result = await recognizeEmployeeFaces(capturedFrame.blob, token);
         if (isCancelled) {
           return;
         }
 
-        setRecognitionResult(result);
+        const faces = result.faces ?? [];
+        const firstFace = faces[0] ?? null;
+        setRecognitionResults(faces);
+        setRecognitionResult(firstFace);
         setCameraMessage(
-          result.status === 'no_face'
+          result.status === 'no_face' || faces.length === 0
             ? 'Camera is live. No face is currently visible to the model.'
             : result.status === 'no_gallery'
-              ? 'Camera is live. A face was detected, but no employee face gallery is uploaded for this organization.'
+              ? 'Camera is live. Faces were detected, but no employee face gallery is uploaded for this organization.'
               : 'Camera is live and face, PPE, fall, and fire monitoring are running.',
         );
 
-        if (result.status === 'no_gallery' && result.alert) {
+        const faceAlerts = faces
+          .map((face) => face.alert)
+          .filter((alert): alert is AlertResponse => Boolean(alert));
+
+        if (faceAlerts.length > 0) {
           setAlerts((current) => {
-            if (current.some((alert) => alert.id === result.alert?.id)) {
-              return current;
-            }
+            const existingIds = new Set(current.map((alert) => alert.id));
+            const nextAlerts = faceAlerts
+              .filter((alert) => !existingIds.has(alert.id))
+              .map((alert) => {
+                const detectedAt = new Date(alert.detected_at);
+                return {
+                  id: alert.id,
+                  occurredAt: detectedAt.toISOString(),
+                  date: detectedAt.toLocaleDateString('en-CA'),
+                  time: detectedAt.toLocaleTimeString('en-US', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  }),
+                  image: alert.employee_name || alert.category,
+                  imageUrl: resolveStorageUrl(alert.evidence_image_path),
+                  typeLabel: getAlertTypeLabel(alert),
+                  detail: alert.message,
+                };
+              });
 
-            const detectedAt = new Date(result.alert.detected_at);
-            const nextAlert = {
-              id: result.alert.id,
-              occurredAt: detectedAt.toISOString(),
-              date: detectedAt.toLocaleDateString('en-CA'),
-              time: detectedAt.toLocaleTimeString('en-US', {
-                hour: '2-digit',
-                minute: '2-digit',
-              }),
-              image: result.alert.employee_name || result.alert.category,
-              imageUrl: resolveStorageUrl(result.alert.evidence_image_path),
-              typeLabel: getAlertTypeLabel(result.alert),
-              detail: result.alert.message,
-            };
-
-            return [nextAlert, ...current];
+            return [...nextAlerts, ...current];
           });
         }
 
-        if (result.status === 'ok' && !result.authorized) {
-          if (result.alert) {
-            setAlerts((current) => {
-              if (current.some((alert) => alert.id === result.alert?.id)) {
-                return current;
-              }
-
-              const detectedAt = new Date(result.alert.detected_at);
-              const nextAlert = {
-                id: result.alert.id,
-                occurredAt: detectedAt.toISOString(),
-                date: detectedAt.toLocaleDateString('en-CA'),
-                time: detectedAt.toLocaleTimeString('en-US', {
-                  hour: '2-digit',
-                  minute: '2-digit',
-                }),
-                image: result.alert.employee_name || result.alert.category,
-                imageUrl: resolveStorageUrl(result.alert.evidence_image_path),
-                typeLabel: getAlertTypeLabel(result.alert),
-                detail: result.alert.message,
-              };
-
-              return [nextAlert, ...current];
-            });
-          }
-          syncAlertState('face', '', '', '');
-        } else {
-          syncAlertState('face', '', '', '');
-        }
+        syncAlertState('face', '', '', '');
       } catch (error) {
         if (isTokenError(error)) {
           handleTokenExpiry();
@@ -1523,15 +1532,18 @@ export function MonitoringPage() {
 
         if (isMissingFaceGalleryError(error)) {
           setRecognitionResult(null);
+          setRecognitionResults([]);
           setCameraMessage('Camera is live, but no employee face images have been uploaded for this organization yet.');
           syncAlertState('face', '', '', '');
         } else if (isFaceRecognitionDisabledError(error)) {
           setRecognitionResult(null);
+          setRecognitionResults([]);
           setIsFaceRecognitionActive(false);
           syncAlertState('face', '', '', '');
         } else {
           console.error('Face recognition failed:', error);
           setRecognitionResult(null);
+          setRecognitionResults([]);
           setCameraMessage('Camera is live. Face recognition is unavailable right now, but monitoring continues.');
         }
       } finally {
@@ -1786,10 +1798,12 @@ export function MonitoringPage() {
       video.playsInline = true;
 
       setRecognitionResult(null);
+      setRecognitionResults([]);
       setHasLiveVideo(false);
       setTrackedFaceBox(null);
       setIsLocalTrackingEnabled(false);
       setIsFaceRecognitionActive(faceRecognitionEnabled);
+      setActiveSafetyModules(['ppe', 'fall', 'fire']);
       setHeadCount(null);
       setAlerts([]);
       setDetectionOverlays([]);
@@ -1811,7 +1825,7 @@ export function MonitoringPage() {
       };
       faceDetectorRef.current = window.FaceDetector
         ? new window.FaceDetector({
-            maxDetectedFaces: 1,
+            maxDetectedFaces: 10,
             fastMode: true,
           })
         : null;
@@ -1875,9 +1889,9 @@ export function MonitoringPage() {
           zone: DEFAULT_MONITORING_ZONE,
           face_recognition_enabled: isFaceRecognitionActive,
           modules: [
-            'ppe_detection',
-            'fall_detection',
-            'fire_smoke_detection',
+            ...(activeSafetyModules.includes('ppe') ? ['ppe_detection'] : []),
+            ...(activeSafetyModules.includes('fall') ? ['fall_detection'] : []),
+            ...(activeSafetyModules.includes('fire') ? ['fire_smoke_detection'] : []),
             ...(isFaceRecognitionActive ? ['face_access_control'] : []),
           ],
           alerts: sessionAlerts.map((alert) => ({
@@ -2021,7 +2035,7 @@ export function MonitoringPage() {
     hasFaceBox &&
     (recognitionResult === null || recognitionResult.status === 'no_face') &&
     isRecognizing;
-  const hasRecognitionFaceOverlay = detectionOverlays.some((overlay) => overlay.id === 'face-recognition');
+  const hasRecognitionFaceOverlay = detectionOverlays.some((overlay) => overlay.id.startsWith('face-recognition'));
   const localFaceBoxStyle =
     isStreaming && trackedFaceBox && !hasRecognitionFaceOverlay
       ? getLocalFaceBoxStyle(trackedFaceBox, videoRef.current)

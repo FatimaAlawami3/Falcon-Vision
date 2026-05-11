@@ -7,6 +7,7 @@ from app.schemas.employee_face_schema import (
     EmployeeFaceUploadResponse,
     FaceRecognitionResponse,
     FaceRecognitionStatusResponse,
+    MultiFaceRecognitionResponse,
 )
 from app.services.employee_face_service import EmployeeFaceService
 
@@ -31,6 +32,15 @@ async def recognize_employee_face(
     current_user: Annotated[dict, Depends(get_current_user)],
 ) -> FaceRecognitionResponse:
     return await employee_face_service.recognize_face(file, current_user)
+
+
+@router.post("/recognize-multiple", response_model=MultiFaceRecognitionResponse)
+async def recognize_multiple_employee_faces(
+    file: Annotated[UploadFile, File(...)],
+    employee_face_service: Annotated[EmployeeFaceService, Depends(get_employee_face_service)],
+    current_user: Annotated[dict, Depends(get_current_user)],
+) -> MultiFaceRecognitionResponse:
+    return await employee_face_service.recognize_faces(file, current_user)
 
 
 @router.get("/status", response_model=FaceRecognitionStatusResponse)

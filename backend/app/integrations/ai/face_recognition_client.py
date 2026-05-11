@@ -286,37 +286,57 @@ class FaceRecognitionClient:
         self._recognizer: ArcFaceRecognizer | None = None
 
     def extract_embedding(self, image_bytes: bytes) -> ExtractedFaceEmbedding | None:
+        embeddings = self.extract_embeddings(image_bytes, max_faces=0)
+        if not embeddings:
+            return None
+
+        return max(
+            embeddings,
+            key=lambda embedding: (embedding.bbox[2] - embedding.bbox[0]) * (embedding.bbox[3] - embedding.bbox[1]),
+        )
+
+    def extract_embeddings(self, image_bytes: bytes, *, max_faces: int = 10) -> list[ExtractedFaceEmbedding]:
         image = self._decode_image(image_bytes)
         if image is None:
-            return None
+            return []
 
         detector, recognizer = self._ensure_models()
-        detections, keypoints = detector.detect(image, input_size=self.det_size, max_num=0)
+        detections, keypoints = detector.detect(image, input_size=self.det_size, max_num=max_faces)
         if detections.shape[0] == 0:
-            return None
+            return []
 
-        face = self._get_largest_face(detections, keypoints)
-        embedding = recognizer.get(image, face).astype(np.float32)
-        embedding /= np.linalg.norm(embedding) + 1e-12
+        embeddings: list[ExtractedFaceEmbedding] = []
+        for index, detection in enumerate(detections):
+            face = DetectedFace(
+                bbox=detection[0:4],
+                kps=keypoints[index] if keypoints is not None else None,
+                det_score=float(detection[4]),
+            )
+            embedding = recognizer.get(image, face).astype(np.float32)
+            embedding /= np.linalg.norm(embedding) + 1e-12
 
-        frontal = None
-        if face.kps is not None:
-            left_eye, right_eye, nose, left_mouth, right_mouth = face.kps
-            eye_width = max(float(np.linalg.norm(right_eye - left_eye)), 1e-6)
-            nose_eye_balance = abs(float(nose[0] - ((left_eye[0] + right_eye[0]) / 2))) / eye_width
-            mouth_tilt = abs(float(left_mouth[1] - right_mouth[1])) / eye_width
-            frontal = nose_eye_balance <= 0.18 and mouth_tilt <= 0.12
+            frontal = None
+            if face.kps is not None:
+                left_eye, right_eye, nose, left_mouth, right_mouth = face.kps
+                eye_width = max(float(np.linalg.norm(right_eye - left_eye)), 1e-6)
+                nose_eye_balance = abs(float(nose[0] - ((left_eye[0] + right_eye[0]) / 2))) / eye_width
+                mouth_tilt = abs(float(left_mouth[1] - right_mouth[1])) / eye_width
+                frontal = nose_eye_balance <= 0.18 and mouth_tilt <= 0.12
 
-        return ExtractedFaceEmbedding(
-            vector=embedding.tolist(),
-            model_name=self.model_name,
-            dimension=int(embedding.shape[0]),
-            detection_score=float(face.det_score),
-            frontal=frontal,
-            bbox=[float(value) for value in face.bbox.tolist()],
-            image_width=int(image.shape[1]),
-            image_height=int(image.shape[0]),
-        )
+            embeddings.append(
+                ExtractedFaceEmbedding(
+                    vector=embedding.tolist(),
+                    model_name=self.model_name,
+                    dimension=int(embedding.shape[0]),
+                    detection_score=float(face.det_score),
+                    frontal=frontal,
+                    bbox=[float(value) for value in face.bbox.tolist()],
+                    image_width=int(image.shape[1]),
+                    image_height=int(image.shape[0]),
+                )
+            )
+
+        return embeddings
 
     def cosine_similarity(self, probe_vector: list[float], reference_vector: list[float]) -> float:
         probe = np.asarray(probe_vector, dtype=np.float32)

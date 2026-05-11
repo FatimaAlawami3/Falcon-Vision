@@ -2,6 +2,7 @@ from typing import List
 
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from pymongo import ReturnDocument
 
 from app.core.constants import EntityStatus, RuleCategory, VisionModule
 from app.models.extracted_rule_model import ExtractedRuleModel
@@ -103,7 +104,7 @@ class ExtractedRuleRepository(BaseRepository):
     async def deactivate_rules_by_module(self, organization_id: str, module: VisionModule, *, updated_by) -> int:
         result = await self.collection.update_many(
             {
-                "organization_id": organization_id,
+                "organization_id": self._organization_query_value(organization_id),
                 "vision_mapping.module": module,
                 "status": EntityStatus.ACTIVE,
                 "is_deleted": {"$ne": True},
@@ -117,6 +118,54 @@ class ExtractedRuleRepository(BaseRepository):
             },
         )
         return int(result.modified_count)
+
+    async def set_rule_status_by_regulation_and_category(
+        self,
+        regulation_id: str | ObjectId,
+        category: RuleCategory,
+        status: EntityStatus,
+        *,
+        updated_by,
+    ) -> int:
+        regulation_object_id = regulation_id if isinstance(regulation_id, ObjectId) else validate_object_id(regulation_id)
+        result = await self.collection.update_many(
+            {
+                "regulation_id": regulation_object_id,
+                "category": category,
+                "is_deleted": {"$ne": True},
+            },
+            {
+                "$set": {
+                    "status": status,
+                    "updated_at": utc_now(),
+                    "updated_by": updated_by,
+                }
+            },
+        )
+        return int(result.modified_count)
+
+    async def set_rule_status_by_id(
+        self,
+        rule_id: str | ObjectId,
+        status: EntityStatus,
+        *,
+        updated_by,
+    ) -> dict | None:
+        rule_object_id = rule_id if isinstance(rule_id, ObjectId) else validate_object_id(rule_id)
+        return await self.collection.find_one_and_update(
+            {
+                "_id": rule_object_id,
+                "is_deleted": {"$ne": True},
+            },
+            {
+                "$set": {
+                    "status": status,
+                    "updated_at": utc_now(),
+                    "updated_by": updated_by,
+                }
+            },
+            return_document=ReturnDocument.AFTER,
+        )
 
     async def set_rule_status_by_regulation(self, regulation_id: str | ObjectId, status: EntityStatus, *, updated_by) -> int:
         regulation_object_id = regulation_id if isinstance(regulation_id, ObjectId) else validate_object_id(regulation_id)

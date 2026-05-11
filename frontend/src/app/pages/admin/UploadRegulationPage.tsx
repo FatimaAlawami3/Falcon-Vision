@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Loader2, Upload } from 'lucide-react';
 import { Navigation } from '../../components/Navigation';
@@ -9,19 +9,24 @@ import {
   activateRegulation,
   cancelRegulationExtraction,
   deleteRegulation,
+  deselectAllRegulationRules,
   downloadRegulation,
   extractRegulation,
   getCurrentRegulation,
   listRegulations,
+  type ExtractedRuleResponse,
   type RegulationResponse,
   type RegulationCurrentResponse,
   type RegulationUploadResponse,
-  setRegulationFaceRecognition,
+  setRegulationModuleEnabled,
+  setRegulationRuleEnabled,
+  selectAllRegulationRules,
   uploadRegulation,
 } from '../../lib/api';
 
 const MAX_REGULATION_PDF_SIZE_MB = 25;
 const MAX_REGULATION_PDF_SIZE_BYTES = MAX_REGULATION_PDF_SIZE_MB * 1024 * 1024;
+type RegulationModuleName = 'ppe' | 'fall' | 'fire_smoke' | 'face_recognition';
 
 const mergeRegulationLists = (
   regulations: RegulationResponse[] | undefined,
@@ -51,7 +56,10 @@ export function UploadRegulationPage() {
   const [downloadingRegulationId, setDownloadingRegulationId] = useState<string | null>(null);
   const [currentRegulation, setCurrentRegulation] = useState<RegulationCurrentResponse | null>(null);
   const [faceRecognitionEnabled, setFaceRecognitionEnabled] = useState(false);
-  const [isSavingFaceRecognition, setIsSavingFaceRecognition] = useState(false);
+  const [savingModule, setSavingModule] = useState<RegulationModuleName | null>(null);
+  const [savingRuleId, setSavingRuleId] = useState<string | null>(null);
+  const [isDeselectingAll, setIsDeselectingAll] = useState(false);
+  const [isSelectingAll, setIsSelectingAll] = useState(false);
   const [modalState, setModalState] = useState({ isOpen: false, title: '', message: '' });
 
   const showWarning = (message: string) => {
@@ -217,10 +225,10 @@ export function UploadRegulationPage() {
     await submitRegulation(droppedFile);
   };
 
-  const handleFaceRecognitionChange = async (enabled: boolean) => {
+  const handleModuleChange = async (moduleName: RegulationModuleName, enabled: boolean) => {
     const token = getAccessToken();
     if (!token) {
-      showWarning('Please log in again before updating face recognition.');
+      showWarning('Please log in again before updating monitoring modules.');
       return;
     }
 
@@ -229,32 +237,106 @@ export function UploadRegulationPage() {
     }
 
     const previousValue = faceRecognitionEnabled;
-    setFaceRecognitionEnabled(enabled);
-    setIsSavingFaceRecognition(true);
+    if (moduleName === 'face_recognition') {
+      setFaceRecognitionEnabled(enabled);
+    }
+    setSavingModule(moduleName);
 
     try {
-      const response = await setRegulationFaceRecognition(currentRegulation.regulation.id, enabled, token);
-      setFaceRecognitionEnabled(response.enabled);
-      setCurrentRegulation((current) =>
-        current
-          ? {
-              ...current,
-              summary: {
-                ...current.summary,
-                face_recognition_enabled: response.enabled,
-              },
-            }
-          : current,
-      );
+      const response = await setRegulationModuleEnabled(currentRegulation.regulation.id, moduleName, enabled, token);
+      applyCurrentRegulation(await withSavedRegulations(response, token));
     } catch (error) {
       if (isTokenError(error)) {
         handleTokenExpiry();
         return;
       }
-      setFaceRecognitionEnabled(previousValue);
-      showWarning(error instanceof Error ? error.message : 'Failed to update face recognition setting.');
+      if (moduleName === 'face_recognition') {
+        setFaceRecognitionEnabled(previousValue);
+      }
+      showWarning(error instanceof Error ? error.message : 'Failed to update monitoring module.');
     } finally {
-      setIsSavingFaceRecognition(false);
+      setSavingModule(null);
+    }
+  };
+
+  const handleRuleChange = async (ruleId: string, enabled: boolean) => {
+    const token = getAccessToken();
+    if (!token) {
+      showWarning('Please log in again before updating monitoring rules.');
+      return;
+    }
+
+    if (!currentRegulation?.regulation) {
+      return;
+    }
+
+    setSavingRuleId(ruleId);
+
+    try {
+      const response = await setRegulationRuleEnabled(currentRegulation.regulation.id, ruleId, enabled, token);
+      applyCurrentRegulation(await withSavedRegulations(response, token));
+    } catch (error) {
+      if (isTokenError(error)) {
+        handleTokenExpiry();
+        return;
+      }
+      showWarning(error instanceof Error ? error.message : 'Failed to update monitoring rule.');
+    } finally {
+      setSavingRuleId(null);
+    }
+  };
+
+  const handleDeselectAll = async () => {
+    const token = getAccessToken();
+    if (!token) {
+      showWarning('Please log in again before updating monitoring rules.');
+      return;
+    }
+
+    if (!currentRegulation?.regulation) {
+      return;
+    }
+
+    setIsDeselectingAll(true);
+
+    try {
+      const response = await deselectAllRegulationRules(currentRegulation.regulation.id, token);
+      applyCurrentRegulation(await withSavedRegulations(response, token));
+    } catch (error) {
+      if (isTokenError(error)) {
+        handleTokenExpiry();
+        return;
+      }
+      showWarning(error instanceof Error ? error.message : 'Failed to deselect all monitoring rules.');
+    } finally {
+      setIsDeselectingAll(false);
+    }
+  };
+
+  const handleSelectAll = async () => {
+    const token = getAccessToken();
+    if (!token) {
+      showWarning('Please log in again before updating monitoring rules.');
+      return;
+    }
+
+    if (!currentRegulation?.regulation) {
+      return;
+    }
+
+    setIsSelectingAll(true);
+
+    try {
+      const response = await selectAllRegulationRules(currentRegulation.regulation.id, token);
+      applyCurrentRegulation(await withSavedRegulations(response, token));
+    } catch (error) {
+      if (isTokenError(error)) {
+        handleTokenExpiry();
+        return;
+      }
+      showWarning(error instanceof Error ? error.message : 'Failed to select all monitoring rules.');
+    } finally {
+      setIsSelectingAll(false);
     }
   };
 
@@ -382,16 +464,62 @@ export function UploadRegulationPage() {
   const isExtractionRunning = isExtracting || extractionStatus === 'pending' || extractionStatus === 'processing';
   const isExtractionStopping = isStoppingExtraction || extractionStatus === 'cancelling';
   const isExtractionBusy = isExtractionRunning || isExtractionStopping;
-  const isAnyActionBusy = isUploading || isExtractionBusy || isDeleting || isSwitching;
+  const isAnyActionBusy = isUploading || isExtractionBusy || isDeleting || isSwitching || isDeselectingAll || isSelectingAll;
   const showExtractionStatus =
     extractionStatus !== 'not_started' &&
     extractionStatus !== 'pending' &&
     extractionStatus !== 'cancelling' &&
     !isExtractionRunning;
   const hasExtractedRules = (currentRegulation?.summary.total_rules ?? 0) > 0;
+  const hasActiveMonitoringRule = (currentRegulation?.extracted_rules ?? []).some((rule) => rule.status === 'active');
   const isExtractionComplete = extractionStatus === 'completed';
-  const canStartMonitoring = isExtractionComplete && hasExtractedRules;
+  const canStartMonitoring = isExtractionComplete && hasActiveMonitoringRule;
   const uploadedFileName = file?.name ?? regulation?.file.original_filename ?? null;
+  const { ppeRuleCards, serviceCards } = useMemo(() => {
+    const rules = currentRegulation?.extracted_rules ?? [];
+    const byCategory = (category: string) => rules.filter((rule: ExtractedRuleResponse) => rule.category === category);
+    const ppeRules = byCategory('ppe');
+    const fallRules = byCategory('fall');
+    const fireRules = byCategory('fire_smoke');
+    const faceRules = byCategory('access_control');
+    const isActive = (moduleRules: ExtractedRuleResponse[]) =>
+      moduleRules.some((rule) => rule.status === 'active');
+
+    return {
+      ppeRuleCards: ppeRules.map((rule) => ({
+        id: rule.id,
+        title: rule.required_classes[0] || rule.source_excerpt || rule.title.replace(/^PPE Requirement:\s*/i, ''),
+        value: rule.source_excerpt ? `Required PPE item: ${rule.source_excerpt}` : rule.title,
+        checked: rule.status === 'active',
+      })),
+      serviceCards: [
+        {
+          moduleName: 'fall' as RegulationModuleName,
+          title: 'Fall detection',
+          value: fallRules.length > 0
+            ? 'Extracted from the PDF'
+            : 'Not extracted from the PDF. Enable it manually if this regulation needs fall alerts.',
+          checked: isActive(fallRules),
+        },
+        {
+          moduleName: 'fire_smoke' as RegulationModuleName,
+          title: 'Fire detection',
+          value: fireRules.length > 0
+            ? 'Extracted from the PDF'
+            : 'Not extracted from the PDF. Enable it manually if this regulation needs fire/smoke alerts.',
+          checked: isActive(fireRules),
+        },
+        {
+          moduleName: 'face_recognition' as RegulationModuleName,
+          title: 'Face recognition',
+          value: faceRules.length > 0
+            ? 'Configured for this regulation'
+            : 'Not extracted from the PDF. Enable it manually if this regulation needs access control.',
+          checked: faceRecognitionEnabled || isActive(faceRules),
+        },
+      ],
+    };
+  }, [currentRegulation?.extracted_rules, faceRecognitionEnabled]);
 
   useEffect(() => {
     if (!regulation || !['pending', 'processing', 'cancelling'].includes(extractionStatus)) {
@@ -567,9 +695,9 @@ export function UploadRegulationPage() {
             </div>
 
             <div className="space-y-4">
-              {hasExtractedRules ? (
+              {isExtractionComplete ? (
                 <h2 className="font-serif text-2xl text-[#9e2a2b]">
-                  Falcon Vision will monitor compliance using the extracted safety rules:
+                  Falcon Vision will monitor compliance using the selected safety rules:
                 </h2>
               ) : null}
 
@@ -597,38 +725,92 @@ export function UploadRegulationPage() {
                         </div>
                       ) : null
                     ) : null}
-                    {hasExtractedRules ? (
-                      <div className="space-y-3">
-                        <div className="rounded-2xl bg-[#fff8f2] border border-[#eedfcd] p-4">
+                    {isExtractionComplete ? (
+                      <div className="space-y-5">
+                        <div className="flex flex-wrap justify-end gap-3">
+                          <button
+                            type="button"
+                            onClick={() => void handleSelectAll()}
+                            disabled={isAnyActionBusy || savingModule !== null || savingRuleId !== null}
+                            className="rounded-full border border-[#d4bfa7] bg-white px-4 py-2 text-sm text-[#8b4a32] shadow-sm transition-colors hover:bg-[#fff3e6] disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            {isSelectingAll ? 'Selecting...' : 'Select All'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleDeselectAll()}
+                            disabled={!hasActiveMonitoringRule || isAnyActionBusy || savingModule !== null || savingRuleId !== null}
+                            className="rounded-full border border-[#d4bfa7] bg-white px-4 py-2 text-sm text-[#8b4a32] shadow-sm transition-colors hover:bg-[#fff3e6] disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            {isDeselectingAll ? 'Deselecting...' : 'Deselect All'}
+                          </button>
+                        </div>
+                        <div className="space-y-3">
                           <p className="text-xs uppercase tracking-[0.2em] text-[#8b7355]">PPE items</p>
-                          <p className="mt-2 text-sm text-[#8b4a32]">
-                            {currentRegulation.summary.ppe_items.length > 0 ? currentRegulation.summary.ppe_items.join(', ') : 'None'}
-                          </p>
+                          {ppeRuleCards.length > 0 ? (
+                            ppeRuleCards.map((ppeRule) => {
+                              const isSaving = savingRuleId === ppeRule.id;
+                              return (
+                                <div
+                                  key={ppeRule.id}
+                                  className="rounded-2xl bg-[#fff8f2] border border-[#eedfcd] p-4"
+                                >
+                                  <div className="flex items-start justify-between gap-4">
+                                    <div>
+                                      <p className="font-medium text-[#8b4a32]">{ppeRule.title}</p>
+                                      <p className="mt-2 text-sm text-[#8b7355]">{ppeRule.value}</p>
+                                    </div>
+                                    <label className="inline-flex items-center gap-3 text-sm font-medium text-[#8b4a32]">
+                                      <input
+                                        type="checkbox"
+                                        checked={ppeRule.checked}
+                                        disabled={isAnyActionBusy || savingModule !== null || savingRuleId !== null}
+                                        onChange={(event) => void handleRuleChange(ppeRule.id, event.target.checked)}
+                                        className="h-4 w-4 rounded border-[#d4bfa7] text-[#d87545] focus:ring-[#d87545] disabled:cursor-not-allowed disabled:opacity-60"
+                                      />
+                                      <span>{isSaving ? 'Saving...' : ppeRule.checked ? 'Active' : 'Inactive'}</span>
+                                    </label>
+                                  </div>
+                                </div>
+                              );
+                            })
+                          ) : (
+                            <div className="rounded-2xl bg-[#fff8f2] border border-[#eedfcd] p-4 text-sm text-[#8b7355]">
+                              No PPE items were extracted from this PDF.
+                            </div>
+                          )}
                         </div>
-                        <div className="rounded-2xl bg-[#fff8f2] border border-[#eedfcd] p-4">
-                          <p className="text-xs uppercase tracking-[0.2em] text-[#8b7355]">Fall Detection</p>
-                          <p className="mt-2 text-sm text-[#8b4a32]">
-                            {currentRegulation.summary.fall_detection_active ? 'Active' : 'Not active'}
-                          </p>
-                        </div>
-                        <div className="rounded-2xl bg-[#fff8f2] border border-[#eedfcd] p-4">
-                          <p className="text-xs uppercase tracking-[0.2em] text-[#8b7355]">Fire detection</p>
-                          <p className="mt-2 text-sm text-[#8b4a32]">
-                            {currentRegulation.summary.fire_smoke_detection_active ? 'Active' : 'Not active'}
-                          </p>
-                        </div>
-                        <div className="rounded-2xl bg-[#fff8f2] border border-[#eedfcd] p-4">
-                          <p className="text-xs uppercase tracking-[0.2em] text-[#8b7355]">Face recognition</p>
-                          <label className="mt-3 inline-flex items-center gap-3 text-sm text-[#8b4a32]">
-                            <input
-                              type="checkbox"
-                              checked={faceRecognitionEnabled}
-                              disabled={isSavingFaceRecognition}
-                              onChange={(event) => void handleFaceRecognitionChange(event.target.checked)}
-                              className="h-4 w-4 rounded border-[#d4bfa7] text-[#d87545] focus:ring-[#d87545]"
-                            />
-                            <span>{isSavingFaceRecognition ? 'Saving...' : 'Enable face recognition'}</span>
-                          </label>
+
+                        <div className="space-y-3">
+                          <p className="text-xs uppercase tracking-[0.2em] text-[#8b7355]">Other services</p>
+                          {serviceCards.map((serviceCard) => {
+                            const isSaving = savingModule === serviceCard.moduleName;
+                            return (
+                              <div
+                                key={serviceCard.moduleName}
+                                className="rounded-2xl bg-[#fff8f2] border border-[#eedfcd] p-4"
+                              >
+                                <div className="flex items-start justify-between gap-4">
+                                  <div>
+                                    <p className="font-medium text-[#8b4a32]">{serviceCard.title}</p>
+                                    <p className="mt-2 text-sm text-[#8b7355]">{serviceCard.value}</p>
+                                  </div>
+                                  <label className="inline-flex items-center gap-3 text-sm font-medium text-[#8b4a32]">
+                                    <input
+                                      type="checkbox"
+                                      checked={serviceCard.checked}
+                                      disabled={isAnyActionBusy || savingModule !== null || savingRuleId !== null}
+                                      onChange={(event) =>
+                                        void handleModuleChange(serviceCard.moduleName, event.target.checked)
+                                      }
+                                      className="h-4 w-4 rounded border-[#d4bfa7] text-[#d87545] focus:ring-[#d87545] disabled:cursor-not-allowed disabled:opacity-60"
+                                    />
+                                    <span>{isSaving ? 'Saving...' : serviceCard.checked ? 'Active' : 'Inactive'}</span>
+                                  </label>
+                                </div>
+                              </div>
+                            );
+                          })}
                         </div>
                       </div>
                     ) : null}
@@ -653,7 +835,9 @@ export function UploadRegulationPage() {
                     )}
                     {!canStartMonitoring ? (
                       <p className="text-center text-sm text-[#8b7355]">
-                        Wait until regulation extraction is completed before starting monitoring.
+                        {isExtractionComplete
+                          ? 'Activate at least one safety rule or service before starting monitoring.'
+                          : 'Wait until regulation extraction is completed before starting monitoring.'}
                       </p>
                     ) : null}
                   </div>

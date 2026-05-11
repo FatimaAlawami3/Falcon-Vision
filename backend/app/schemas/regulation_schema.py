@@ -40,6 +40,7 @@ class RegulationResponse(BaseModel):
 class ExtractedRuleResponse(BaseModel):
     id: str
     category: str
+    status: str
     severity: str
     title: str
     description: str
@@ -77,4 +78,12 @@ class FaceRecognitionSettingRequest(BaseModel):
 
 
 class FaceRecognitionSettingResponse(BaseModel):
+    enabled: bool
+
+
+class RegulationModuleSettingRequest(BaseModel):
+    enabled: bool
+
+
+class RegulationRuleSettingRequest(BaseModel):
     enabled: bool

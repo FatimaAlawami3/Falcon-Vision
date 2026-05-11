@@ -64,5 +64,10 @@ class FaceRecognitionResponse(BaseModel):
     alert: AlertResponse | None = None
 
 
+class MultiFaceRecognitionResponse(BaseModel):
+    status: str
+    faces: list[FaceRecognitionResponse]
+
+
 class FaceRecognitionStatusResponse(BaseModel):
     enabled: bool

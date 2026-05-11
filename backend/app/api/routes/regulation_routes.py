@@ -8,6 +8,8 @@ from app.schemas.regulation_schema import (
     FaceRecognitionSettingRequest,
     FaceRecognitionSettingResponse,
     RegulationCurrentResponse,
+    RegulationModuleSettingRequest,
+    RegulationRuleSettingRequest,
     RegulationResponse,
     RegulationUploadResponse,
 )
@@ -121,6 +123,56 @@ async def set_face_recognition_setting(
 ) -> FaceRecognitionSettingResponse:
     return await regulation_service.set_face_recognition_enabled(
         regulation_id,
+        body.enabled,
+        current_user,
+    )
+
+
+@router.post("/{regulation_id}/modules/{module_name}", response_model=RegulationCurrentResponse)
+async def set_regulation_module_setting(
+    regulation_id: str,
+    module_name: str,
+    body: RegulationModuleSettingRequest,
+    regulation_service: Annotated[RegulationService, Depends(get_regulation_service)],
+    current_user: Annotated[dict, Depends(get_current_user)],
+) -> RegulationCurrentResponse:
+    return await regulation_service.set_module_enabled(
+        regulation_id,
+        module_name,
+        body.enabled,
+        current_user,
+    )
+
+
+@router.post("/{regulation_id}/rules/deselect-all", response_model=RegulationCurrentResponse)
+async def deselect_all_regulation_rules(
+    regulation_id: str,
+    regulation_service: Annotated[RegulationService, Depends(get_regulation_service)],
+    current_user: Annotated[dict, Depends(get_current_user)],
+) -> RegulationCurrentResponse:
+    return await regulation_service.deselect_all_rules(regulation_id, current_user)
+
+
+@router.post("/{regulation_id}/rules/select-all", response_model=RegulationCurrentResponse)
+async def select_all_regulation_rules(
+    regulation_id: str,
+    regulation_service: Annotated[RegulationService, Depends(get_regulation_service)],
+    current_user: Annotated[dict, Depends(get_current_user)],
+) -> RegulationCurrentResponse:
+    return await regulation_service.select_all_rules(regulation_id, current_user)
+
+
+@router.post("/{regulation_id}/rules/{rule_id}", response_model=RegulationCurrentResponse)
+async def set_regulation_rule_setting(
+    regulation_id: str,
+    rule_id: str,
+    body: RegulationRuleSettingRequest,
+    regulation_service: Annotated[RegulationService, Depends(get_regulation_service)],
+    current_user: Annotated[dict, Depends(get_current_user)],
+) -> RegulationCurrentResponse:
+    return await regulation_service.set_rule_enabled(
+        regulation_id,
+        rule_id,
         body.enabled,
         current_user,
     )

@@ -8,7 +8,7 @@ import numpy as np
 
 from app.core.constants import RuleCategory, Severity, UserRole, VisionModule, normalize_user_role
 from app.core.exceptions import AppError, NotFoundError, PermissionDeniedError
-from app.integrations.ai.face_recognition_client import FaceRecognitionClient
+from app.integrations.ai.face_recognition_client import ExtractedFaceEmbedding, FaceRecognitionClient
 from app.integrations.storage.storage_client import StorageClient
 from app.models.employee_face_model import EmployeeFaceModel, FaceQuality
 from app.repositories.employee_face_repository import EmployeeFaceRepository
@@ -23,6 +23,7 @@ from app.schemas.employee_face_schema import (
     FaceQualityResponse,
     FaceRecognitionResponse,
     FaceRecognitionStatusResponse,
+    MultiFaceRecognitionResponse,
 )
 from app.utils.datetime import utc_now
 from app.utils.file_validation import (
@@ -152,46 +153,101 @@ class EmployeeFaceService:
         if len(extracted_files) != 1:
             raise AppError("Recognition expects exactly one image file")
 
-        face_file = extracted_files[0]
-        probe_embedding = self.face_recognition_client.extract_embedding(face_file["content"])
-        if probe_embedding is None:
+        multi_response = await self._recognize_face_file(extracted_files[0], current_user, max_faces=0)
+        if not multi_response.faces:
             return FaceRecognitionResponse(
                 status="no_face",
                 authorized=False,
                 threshold=self.face_recognition_client.match_threshold,
             )
 
+        return max(
+            multi_response.faces,
+            key=lambda face: (
+                0
+                if face.face_box is None
+                else (face.face_box.x2 - face.face_box.x1) * (face.face_box.y2 - face.face_box.y1)
+            ),
+        )
+
+    async def recognize_faces(
+        self,
+        file: UploadFile,
+        current_user: dict,
+    ) -> MultiFaceRecognitionResponse:
+        if not await self.is_face_recognition_enabled(current_user):
+            raise AppError("Face recognition is disabled for this organization")
+
+        extracted_files = await self._extract_face_files(file)
+        if len(extracted_files) != 1:
+            raise AppError("Recognition expects exactly one image file")
+
+        return await self._recognize_face_file(extracted_files[0], current_user, max_faces=10)
+
+    async def _recognize_face_file(
+        self,
+        face_file: dict[str, str | bytes],
+        current_user: dict,
+        *,
+        max_faces: int,
+    ) -> MultiFaceRecognitionResponse:
+        image_content = face_file["content"]
+        if not isinstance(image_content, bytes):
+            raise AppError("Invalid image file")
+
+        probe_embeddings = self.face_recognition_client.extract_embeddings(image_content, max_faces=max_faces)
+        if not probe_embeddings:
+            return MultiFaceRecognitionResponse(status="no_face", faces=[])
+
         gallery = await self.employee_face_repository.list_active_faces(ObjectId(current_user["organization_id"]))
         if not gallery:
-            created_alert = await self.alert_service.create_alert(
-                organization_id=current_user["organization_id"],
-                title="No face gallery uploaded",
-                message="No face gallery uploaded",
-                category=RuleCategory.ACCESS_CONTROL,
-                severity=Severity.MEDIUM,
-                image_bytes=face_file["content"],
-                bbox=probe_embedding.bbox,
-            )
-            return FaceRecognitionResponse(
-                status="no_gallery",
-                authorized=False,
-                threshold=self.face_recognition_client.match_threshold,
-                face_box=FaceBoxResponse(
-                    x1=probe_embedding.bbox[0],
-                    y1=probe_embedding.bbox[1],
-                    x2=probe_embedding.bbox[2],
-                    y2=probe_embedding.bbox[3],
-                    image_width=probe_embedding.image_width,
-                    image_height=probe_embedding.image_height,
-                ),
-                alert=created_alert,
-            )
+            faces = []
+            for probe_embedding in probe_embeddings:
+                created_alert = await self.alert_service.create_alert(
+                    organization_id=current_user["organization_id"],
+                    title="No face gallery uploaded",
+                    message="No face gallery uploaded",
+                    category=RuleCategory.ACCESS_CONTROL,
+                    severity=Severity.MEDIUM,
+                    image_bytes=image_content,
+                    bbox=probe_embedding.bbox,
+                )
+                faces.append(
+                    FaceRecognitionResponse(
+                        status="no_gallery",
+                        authorized=False,
+                        threshold=self.face_recognition_client.match_threshold,
+                        face_box=self._face_box_response(probe_embedding),
+                        alert=created_alert,
+                    )
+                )
+            return MultiFaceRecognitionResponse(status="no_gallery", faces=faces)
 
-        probe_vector = np.asarray(probe_embedding.vector, dtype=np.float32)
         employee_gallery = await self._build_employee_gallery(gallery)
         if not employee_gallery:
             raise NotFoundError("No valid employee face embeddings were found")
 
+        faces = [
+            await self._recognize_embedding(
+                probe_embedding=probe_embedding,
+                image_bytes=image_content,
+                employee_gallery=employee_gallery,
+                current_user=current_user,
+            )
+            for probe_embedding in probe_embeddings
+        ]
+
+        return MultiFaceRecognitionResponse(status="ok", faces=faces)
+
+    async def _recognize_embedding(
+        self,
+        *,
+        probe_embedding: ExtractedFaceEmbedding,
+        image_bytes: bytes,
+        employee_gallery: dict,
+        current_user: dict,
+    ) -> FaceRecognitionResponse:
+        probe_vector = np.asarray(probe_embedding.vector, dtype=np.float32)
         best_face_doc: dict | None = None
         best_employee_id = None
         best_score = -1.0
@@ -225,14 +281,7 @@ class EmployeeFaceService:
             matched_face_id=str(best_face_doc["_id"]),
             matched_employee_id=str(best_employee_id),
             matched_employee_name=employee_name,
-            face_box=FaceBoxResponse(
-                x1=probe_embedding.bbox[0],
-                y1=probe_embedding.bbox[1],
-                x2=probe_embedding.bbox[2],
-                y2=probe_embedding.bbox[3],
-                image_width=probe_embedding.image_width,
-                image_height=probe_embedding.image_height,
-            ),
+            face_box=self._face_box_response(probe_embedding),
         )
         if not authorized:
             alert_title = "Unauthorized face" if employee_name else "Unknown face"
@@ -242,12 +291,23 @@ class EmployeeFaceService:
                 message=alert_title,
                 category=RuleCategory.ACCESS_CONTROL,
                 severity=Severity.MEDIUM,
-                image_bytes=face_file["content"],
+                image_bytes=image_bytes,
                 bbox=probe_embedding.bbox,
                 employee_name=employee_name,
             )
             response.alert = created_alert
         return response
+
+    @staticmethod
+    def _face_box_response(probe_embedding: ExtractedFaceEmbedding) -> FaceBoxResponse:
+        return FaceBoxResponse(
+            x1=probe_embedding.bbox[0],
+            y1=probe_embedding.bbox[1],
+            x2=probe_embedding.bbox[2],
+            y2=probe_embedding.bbox[3],
+            image_width=probe_embedding.image_width,
+            image_height=probe_embedding.image_height,
+        )
 
     async def get_face_recognition_status(self, current_user: dict) -> FaceRecognitionStatusResponse:
         return FaceRecognitionStatusResponse(

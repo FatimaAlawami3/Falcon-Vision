@@ -206,6 +206,12 @@ export interface FaceRecognitionResponse {
     image_width: number;
     image_height: number;
   } | null;
+  alert?: AlertResponse | null;
+}
+
+export interface MultiFaceRecognitionResponse {
+  status: string;
+  faces: FaceRecognitionResponse[];
 }
 
 export interface FaceRecognitionStatusResponse {
@@ -406,6 +412,7 @@ export interface RegulationResponse {
 export interface ExtractedRuleResponse {
   id: string;
   category: string;
+  status: string;
   severity: string;
   title: string;
   description: string;
@@ -691,6 +698,36 @@ export function setRegulationFaceRecognition(regulationId: string, enabled: bool
   });
 }
 
+export function setRegulationModuleEnabled(regulationId: string, moduleName: string, enabled: boolean, token: string) {
+  return apiRequest<RegulationCurrentResponse>(`/api/regulations/${regulationId}/modules/${moduleName}`, {
+    method: 'POST',
+    token,
+    body: { enabled },
+  });
+}
+
+export function setRegulationRuleEnabled(regulationId: string, ruleId: string, enabled: boolean, token: string) {
+  return apiRequest<RegulationCurrentResponse>(`/api/regulations/${regulationId}/rules/${ruleId}`, {
+    method: 'POST',
+    token,
+    body: { enabled },
+  });
+}
+
+export function deselectAllRegulationRules(regulationId: string, token: string) {
+  return apiRequest<RegulationCurrentResponse>(`/api/regulations/${regulationId}/rules/deselect-all`, {
+    method: 'POST',
+    token,
+  });
+}
+
+export function selectAllRegulationRules(regulationId: string, token: string) {
+  return apiRequest<RegulationCurrentResponse>(`/api/regulations/${regulationId}/rules/select-all`, {
+    method: 'POST',
+    token,
+  });
+}
+
 export function recognizeEmployeeFace(file: Blob, token: string) {
   const formData = new FormData();
   const uploadFile =
@@ -699,6 +736,20 @@ export function recognizeEmployeeFace(file: Blob, token: string) {
   formData.append('file', uploadFile, uploadFile.name);
 
   return apiRequest<FaceRecognitionResponse>('/api/employee-faces/recognize', {
+    method: 'POST',
+    token,
+    body: formData,
+  });
+}
+
+export function recognizeEmployeeFaces(file: Blob, token: string) {
+  const formData = new FormData();
+  const uploadFile =
+    file instanceof File ? file : new File([file], 'camera-frame.jpg', { type: file.type || 'image/jpeg' });
+
+  formData.append('file', uploadFile, uploadFile.name);
+
+  return apiRequest<MultiFaceRecognitionResponse>('/api/employee-faces/recognize-multiple', {
     method: 'POST',
     token,
     body: formData,

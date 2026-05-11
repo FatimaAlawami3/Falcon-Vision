@@ -394,6 +394,16 @@ class RegulationService:
         enabled: bool,
         current_user: dict,
     ) -> FaceRecognitionSettingResponse:
+        await self.set_module_enabled(regulation_id, "face_recognition", enabled, current_user)
+        return FaceRecognitionSettingResponse(enabled=enabled)
+
+    async def set_module_enabled(
+        self,
+        regulation_id: str,
+        module_name: str,
+        enabled: bool,
+        current_user: dict,
+    ) -> RegulationCurrentResponse:
         self._ensure_admin(current_user)
 
         regulation = await self.regulation_repository.find_by_id(validate_object_id(regulation_id))
@@ -403,42 +413,144 @@ class RegulationService:
         if str(regulation["organization_id"]) != str(current_user["organization_id"]):
             raise PermissionDeniedError("Regulation does not belong to your organization")
 
+        category = self._module_name_to_category(module_name)
         organization_id = current_user["organization_id"]
-        await self.rule_repository.deactivate_rules_by_module(
-            organization_id,
-            VisionModule.FACE_ACCESS_CONTROL,
+        existing_rules = await self.rule_repository.get_rules_by_regulation(regulation_id)
+        category_rules = [rule for rule in existing_rules if rule.category == category]
+
+        if category == RuleCategory.ACCESS_CONTROL:
+            if category_rules:
+                await self.rule_repository.set_rule_status_by_regulation_and_category(
+                    regulation_id,
+                    category,
+                    EntityStatus.ACTIVE if enabled else EntityStatus.INACTIVE,
+                    updated_by=current_user["_id"],
+                )
+            elif enabled:
+                await self._create_manual_module_rule(
+                    regulation_id=regulation_id,
+                    organization_id=organization_id,
+                    category=category,
+                    created_by=current_user["_id"],
+                )
+        elif enabled and not category_rules:
+            await self._create_manual_module_rule(
+                regulation_id=regulation_id,
+                organization_id=organization_id,
+                category=category,
+                created_by=current_user["_id"],
+            )
+        else:
+            await self.rule_repository.set_rule_status_by_regulation_and_category(
+                regulation_id,
+                category,
+                EntityStatus.ACTIVE if enabled else EntityStatus.INACTIVE,
+                updated_by=current_user["_id"],
+            )
+
+        updated_regulation = await self.regulation_repository.find_by_id(validate_object_id(regulation_id))
+        if updated_regulation is None:
+            raise AppError("Regulation not found")
+
+        return await self._build_regulation_payload(updated_regulation)
+
+    async def set_rule_enabled(
+        self,
+        regulation_id: str,
+        rule_id: str,
+        enabled: bool,
+        current_user: dict,
+    ) -> RegulationCurrentResponse:
+        self._ensure_admin(current_user)
+
+        regulation = await self.regulation_repository.find_by_id(validate_object_id(regulation_id))
+        if regulation is None:
+            raise AppError("Regulation not found")
+
+        if str(regulation["organization_id"]) != str(current_user["organization_id"]):
+            raise PermissionDeniedError("Regulation does not belong to your organization")
+
+        rule = await self.rule_repository.find_by_id(validate_object_id(rule_id))
+        if rule is None:
+            raise AppError("Extracted rule not found")
+
+        if str(rule["regulation_id"]) != str(regulation["_id"]):
+            raise PermissionDeniedError("Extracted rule does not belong to this regulation")
+
+        await self.rule_repository.set_rule_status_by_id(
+            rule_id,
+            EntityStatus.ACTIVE if enabled else EntityStatus.INACTIVE,
             updated_by=current_user["_id"],
         )
 
-        if enabled:
-            face_rule = ExtractedRuleModel(
-                regulation_id=validate_object_id(regulation_id),
-                organization_id=organization_id,
-                rule_code="FACE-001",
-                title="Face Recognition Access Control",
-                description="Face recognition is enabled for monitoring based on the uploaded regulation workflow.",
-                category=RuleCategory.ACCESS_CONTROL,
-                severity=Severity.MEDIUM,
-                applies_to={
-                    "zone_types": ["production", "warehouse", "maintenance", "entrance", "restricted"],
-                    "employee_roles": ["worker", "supervisor"],
-                    "camera_tags": ["face-recognition"],
-                },
-                vision_mapping={
-                    "module": VisionModule.FACE_ACCESS_CONTROL,
-                    "required_classes": [],
-                    "violation_when": "detected",
-                    "confidence_threshold": 0.5,
-                },
-                source={
-                    "text_excerpt": "Face recognition manually enabled from regulation extraction results.",
-                },
-                created_by=current_user["_id"],
-                updated_by=current_user["_id"],
-            )
-            await self.rule_repository.insert_model(face_rule)
+        updated_regulation = await self.regulation_repository.find_by_id(validate_object_id(regulation_id))
+        if updated_regulation is None:
+            raise AppError("Regulation not found")
 
-        return FaceRecognitionSettingResponse(enabled=enabled)
+        return await self._build_regulation_payload(updated_regulation)
+
+    async def deselect_all_rules(
+        self,
+        regulation_id: str,
+        current_user: dict,
+    ) -> RegulationCurrentResponse:
+        self._ensure_admin(current_user)
+
+        regulation = await self.regulation_repository.find_by_id(validate_object_id(regulation_id))
+        if regulation is None:
+            raise AppError("Regulation not found")
+
+        if str(regulation["organization_id"]) != str(current_user["organization_id"]):
+            raise PermissionDeniedError("Regulation does not belong to your organization")
+
+        await self.rule_repository.set_rule_status_by_regulation(
+            regulation_id,
+            EntityStatus.INACTIVE,
+            updated_by=current_user["_id"],
+        )
+
+        updated_regulation = await self.regulation_repository.find_by_id(validate_object_id(regulation_id))
+        if updated_regulation is None:
+            raise AppError("Regulation not found")
+
+        return await self._build_regulation_payload(updated_regulation)
+
+    async def select_all_rules(
+        self,
+        regulation_id: str,
+        current_user: dict,
+    ) -> RegulationCurrentResponse:
+        self._ensure_admin(current_user)
+
+        regulation = await self.regulation_repository.find_by_id(validate_object_id(regulation_id))
+        if regulation is None:
+            raise AppError("Regulation not found")
+
+        if str(regulation["organization_id"]) != str(current_user["organization_id"]):
+            raise PermissionDeniedError("Regulation does not belong to your organization")
+
+        await self.rule_repository.set_rule_status_by_regulation(
+            regulation_id,
+            EntityStatus.ACTIVE,
+            updated_by=current_user["_id"],
+        )
+
+        rules = await self.rule_repository.get_rules_by_regulation(regulation_id)
+        existing_categories = {rule.category for rule in rules}
+        for category in (RuleCategory.FALL, RuleCategory.FIRE_SMOKE, RuleCategory.ACCESS_CONTROL):
+            if category not in existing_categories:
+                await self._create_manual_module_rule(
+                    regulation_id=regulation_id,
+                    organization_id=current_user["organization_id"],
+                    category=category,
+                    created_by=current_user["_id"],
+                )
+
+        updated_regulation = await self.regulation_repository.find_by_id(validate_object_id(regulation_id))
+        if updated_regulation is None:
+            raise AppError("Regulation not found")
+
+        return await self._build_regulation_payload(updated_regulation)
 
     async def is_face_recognition_enabled(self, organization_id) -> bool:
         rules = await self.rule_repository.get_rules_by_module(
@@ -761,6 +873,116 @@ class RegulationService:
                 return positive_class
         return class_name
 
+    async def _create_manual_module_rule(
+        self,
+        *,
+        regulation_id: str,
+        organization_id,
+        category: RuleCategory,
+        created_by,
+    ) -> ExtractedRuleModel:
+        if category == RuleCategory.FALL:
+            rule_data = {
+                "rule_code": "FALL-MANUAL",
+                "title": "Fall Detection Monitoring",
+                "description": "Fall detection was manually enabled from regulation controls.",
+                "category": RuleCategory.FALL,
+                "severity": Severity.CRITICAL,
+                "applies_to": {
+                    "zone_types": ["production", "warehouse", "heights"],
+                    "employee_roles": ["worker", "supervisor"],
+                    "camera_tags": ["fall-check"],
+                },
+                "vision_mapping": {
+                    "module": VisionModule.FALL_DETECTION,
+                    "required_classes": ["person_fallen"],
+                    "violation_when": "detected",
+                    "confidence_threshold": 0.7,
+                },
+                "source": {
+                    "text_excerpt": "Fall detection manually enabled from regulation controls.",
+                },
+            }
+        elif category == RuleCategory.FIRE_SMOKE:
+            rule_data = {
+                "rule_code": "FIRE-MANUAL",
+                "title": "Fire/Smoke Detection Monitoring",
+                "description": "Fire and smoke detection was manually enabled from regulation controls.",
+                "category": RuleCategory.FIRE_SMOKE,
+                "severity": Severity.CRITICAL,
+                "applies_to": {
+                    "zone_types": ["production", "warehouse", "fire_risk"],
+                    "employee_roles": ["worker", "supervisor"],
+                    "camera_tags": ["fire-check"],
+                },
+                "vision_mapping": {
+                    "module": VisionModule.FIRE_SMOKE_DETECTION,
+                    "required_classes": ["fire", "smoke"],
+                    "violation_when": "detected",
+                    "confidence_threshold": 0.6,
+                },
+                "source": {
+                    "text_excerpt": "Fire/smoke detection manually enabled from regulation controls.",
+                },
+            }
+        elif category == RuleCategory.ACCESS_CONTROL:
+            rule_data = {
+                "rule_code": "FACE-MANUAL",
+                "title": "Face Recognition Access Control",
+                "description": "Face recognition is enabled for monitoring based on the uploaded regulation workflow.",
+                "category": RuleCategory.ACCESS_CONTROL,
+                "severity": Severity.MEDIUM,
+                "applies_to": {
+                    "zone_types": ["production", "warehouse", "maintenance", "entrance", "restricted"],
+                    "employee_roles": ["worker", "supervisor"],
+                    "camera_tags": ["face-recognition"],
+                },
+                "vision_mapping": {
+                    "module": VisionModule.FACE_ACCESS_CONTROL,
+                    "required_classes": [],
+                    "violation_when": "detected",
+                    "confidence_threshold": 0.5,
+                },
+                "source": {
+                    "text_excerpt": "Face recognition manually enabled from regulation controls.",
+                },
+            }
+        else:
+            raise AppError("This module cannot be created manually")
+
+        rule_model = ExtractedRuleModel(
+            regulation_id=validate_object_id(regulation_id),
+            organization_id=organization_id,
+            status=EntityStatus.ACTIVE,
+            created_by=created_by,
+            updated_by=created_by,
+            **rule_data,
+        )
+        saved_data = await self.rule_repository.insert_model(rule_model)
+        return ExtractedRuleModel(**saved_data)
+
+    @staticmethod
+    def _module_name_to_category(module_name: str) -> RuleCategory:
+        normalized = module_name.strip().lower().replace("-", "_")
+        module_map = {
+            "ppe": RuleCategory.PPE,
+            "ppe_detection": RuleCategory.PPE,
+            "fall": RuleCategory.FALL,
+            "fall_detection": RuleCategory.FALL,
+            "fire": RuleCategory.FIRE_SMOKE,
+            "fire_smoke": RuleCategory.FIRE_SMOKE,
+            "fire_detection": RuleCategory.FIRE_SMOKE,
+            "fire_smoke_detection": RuleCategory.FIRE_SMOKE,
+            "face": RuleCategory.ACCESS_CONTROL,
+            "face_recognition": RuleCategory.ACCESS_CONTROL,
+            "face_access_control": RuleCategory.ACCESS_CONTROL,
+            "access_control": RuleCategory.ACCESS_CONTROL,
+        }
+        category = module_map.get(normalized)
+        if category is None:
+            raise AppError("Unsupported regulation module")
+        return category
+
     def _fallback_ppe_mapping(self, ppe_item: str) -> str:
         normalized = ppe_item.strip().lower()
         fallback_map = {
@@ -823,6 +1045,7 @@ class RegulationService:
         return ExtractedRuleResponse(
             id=str(rule.id),
             category=str(rule.category),
+            status=str(rule.status),
             severity=str(rule.severity),
             title=rule.title,
             description=rule.description,
@@ -834,10 +1057,11 @@ class RegulationService:
         )
 
     def _build_summary(self, rules: list[ExtractedRuleResponse]) -> RegulationExtractionSummary:
+        active_rules = [rule for rule in rules if rule.status == EntityStatus.ACTIVE.value]
         ppe_items = sorted(
             {
                 required_class
-                for rule in rules
+                for rule in active_rules
                 if rule.category == RuleCategory.PPE.value
                 for required_class in rule.required_classes
             }
@@ -845,8 +1069,8 @@ class RegulationService:
         return RegulationExtractionSummary(
             total_rules=len(rules),
             ppe_items=ppe_items,
-            fall_detection_active=any(rule.category == RuleCategory.FALL.value for rule in rules),
-            fire_smoke_detection_active=any(rule.category == RuleCategory.FIRE_SMOKE.value for rule in rules),
+            fall_detection_active=any(rule.category == RuleCategory.FALL.value for rule in active_rules),
+            fire_smoke_detection_active=any(rule.category == RuleCategory.FIRE_SMOKE.value for rule in active_rules),
             face_recognition_enabled=False,
         )
 
@@ -857,7 +1081,8 @@ class RegulationService:
         rule_responses = [self._rule_response(rule) for rule in rules]
         summary = self._build_summary(rule_responses)
         summary.face_recognition_enabled = any(
-            rule.category == RuleCategory.ACCESS_CONTROL.value for rule in rule_responses
+            rule.category == RuleCategory.ACCESS_CONTROL.value and rule.status == EntityStatus.ACTIVE.value
+            for rule in rule_responses
         )
         return RegulationCurrentResponse(
             regulation=self._regulation_response(regulation_data),
