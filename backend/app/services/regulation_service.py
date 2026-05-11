@@ -19,6 +19,7 @@ from app.models.regulation_model import RegulationExtractionState, RegulationMod
 from app.repositories.alert_repository import AlertRepository
 from app.repositories.extracted_rule_repository import ExtractedRuleRepository
 from app.repositories.regulation_repository import RegulationRepository
+from app.repositories.user_repository import UserRepository
 from app.schemas.regulation_schema import (
     RegulationCurrentResponse,
     ExtractedRuleResponse,
@@ -73,6 +74,7 @@ class RegulationService:
         rule_repository: ExtractedRuleRepository,
         storage_client: StorageClient,
         alert_repository: AlertRepository,
+        user_repository: UserRepository | None = None,
         safety_extractor: SafetyRulesExtractor | None = None,
         clip_mapping_client: CLIPMappingClient | None = None,
         clip_mapping_client_factory: Callable[[], CLIPMappingClient | None] | None = None,
@@ -81,6 +83,7 @@ class RegulationService:
         self.rule_repository = rule_repository
         self.storage_client = storage_client
         self.alert_repository = alert_repository
+        self.user_repository = user_repository
         self.safety_extractor = safety_extractor
         self.clip_mapping_client = clip_mapping_client
         self.clip_mapping_client_factory = clip_mapping_client_factory
@@ -92,6 +95,7 @@ class RegulationService:
         rule_repository: ExtractedRuleRepository,
         storage_client: StorageClient,
         alert_repository: AlertRepository,
+        user_repository: UserRepository | None = None,
     ) -> "RegulationService":
         """Factory method to create regulation service."""
         settings = get_settings()
@@ -101,6 +105,7 @@ class RegulationService:
             rule_repository=rule_repository,
             storage_client=storage_client,
             alert_repository=alert_repository,
+            user_repository=user_repository,
             safety_extractor=SafetyRulesExtractor(settings.HF_TOKEN),
             clip_mapping_client_factory=cls._build_clip_mapping_client,
         )
@@ -214,7 +219,6 @@ class RegulationService:
         )
 
     async def get_current_regulation(self, current_user: dict) -> RegulationCurrentResponse:
-        self._ensure_admin(current_user)
         current_regulation = await self.regulation_repository.get_current_regulation(current_user["organization_id"])
         if current_regulation is None:
             return await self._empty_regulation_payload(current_user["organization_id"])
@@ -659,19 +663,27 @@ class RegulationService:
         ppe_list = extracted_data.get("PPE_list", [])
 
         if ppe_list:
+            grouped_ppe_items: dict[str, list[str]] = {}
             for ppe_item in ppe_list:
                 mapped_class = self._map_single_requirement(
                     ppe_item,
                     PPE_DETECTOR_CLASSES,
                     fallback=self._fallback_ppe_mapping(ppe_item),
                 )
+                if mapped_class not in grouped_ppe_items:
+                    grouped_ppe_items[mapped_class] = []
+                if ppe_item not in grouped_ppe_items[mapped_class]:
+                    grouped_ppe_items[mapped_class].append(ppe_item)
+
+            for mapped_class, extracted_items in grouped_ppe_items.items():
+                extracted_names = ", ".join(extracted_items)
 
                 rule_data = {
                     "regulation_id": regulation_id,
                     "organization_id": organization_id,
                     "rule_code": f"PPE-{len(saved_rules) + 1:03d}",
-                    "title": f"PPE Requirement: {ppe_item.title()}",
-                    "description": f"Required PPE item: {ppe_item}. Mapped detector class: {mapped_class}.",
+                    "title": f"PPE Requirement: {mapped_class}",
+                    "description": f"Required PPE item: {mapped_class}. Extracted names: {extracted_names}.",
                     "category": RuleCategory.PPE,
                     "severity": Severity.HIGH,
                     "applies_to": {
@@ -686,7 +698,7 @@ class RegulationService:
                         "confidence_threshold": 0.5
                     },
                     "source": {
-                        "text_excerpt": ppe_item,
+                        "text_excerpt": extracted_names,
                     },
                     "status": rule_status,
                 }
@@ -1089,6 +1101,7 @@ class RegulationService:
             regulations=[self._regulation_response(regulation.model_dump(by_alias=True)) for regulation in regulations],
             extracted_rules=rule_responses,
             summary=summary,
+            admin_name=await self._get_admin_name(regulation_data["organization_id"]),
         )
 
     async def _empty_regulation_payload(self, organization_id) -> RegulationCurrentResponse:
@@ -1104,7 +1117,19 @@ class RegulationService:
                 fire_smoke_detection_active=False,
                 face_recognition_enabled=False,
             ),
+            admin_name=await self._get_admin_name(organization_id),
         )
+
+    async def _get_admin_name(self, organization_id) -> str | None:
+        if self.user_repository is None:
+            return None
+
+        users = await self.user_repository.list_by_organization(organization_id)
+        admin = next((user for user in users if str(user.get("role")) == "admin"), None)
+        if admin is None:
+            return None
+
+        return admin.get("full_name") or admin.get("email")
 
     async def _delete_stored_file(self, storage_path: str | None) -> None:
         if not storage_path:

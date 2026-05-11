@@ -222,6 +222,7 @@ export interface PPEDetectionItem {
   class_name: string;
   confidence: number;
   bbox: number[];
+  track_id?: number | string | null;
 }
 
 export interface PPEDetectionResponse {
@@ -257,6 +258,7 @@ export interface FallDetectionResponse {
   falls_detected: number;
   detections: Array<{
     person_id: number;
+    track_id?: number | string | null;
     is_fallen: boolean;
     confidence: number;
     bbox: number[];
@@ -275,6 +277,7 @@ export interface FireDetectionResponse {
     class: string;
     confidence: number;
     bbox: number[];
+    track_id?: number | string | null;
   }>;
   fire_detection_active: boolean;
   zone_type?: string | null;
@@ -443,6 +446,7 @@ export interface RegulationCurrentResponse {
   regulations: RegulationResponse[];
   extracted_rules: ExtractedRuleResponse[];
   summary: RegulationExtractionSummary;
+  admin_name?: string | null;
 }
 
 export interface FaceRecognitionSettingResponse {

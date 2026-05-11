@@ -71,6 +71,7 @@ class RegulationCurrentResponse(BaseModel):
     regulations: list[RegulationResponse]
     extracted_rules: list[ExtractedRuleResponse]
     summary: RegulationExtractionSummary
+    admin_name: str | None = None
 
 
 class FaceRecognitionSettingRequest(BaseModel):

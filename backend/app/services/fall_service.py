@@ -112,6 +112,7 @@ class FallDetectionService:
             "detections": [
                 {
                     "person_id": int(d.person_id),
+                    "track_id": int(d.track_id) if d.track_id is not None else None,
                     "is_fallen": bool(d.is_fallen),
                     "confidence": float(d.confidence),
                     "bbox": [float(value) for value in d.bbox],

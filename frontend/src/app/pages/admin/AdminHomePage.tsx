@@ -10,9 +10,9 @@ export function AdminHomePage() {
       description: 'Automatically detect and verify proper use of personal protective equipment'
     },
     {
-      icon: Eye,
-      title: 'Face Recognition',
-      description: 'Identify authorized personnel in restricted areas and track attendance'
+      icon: AlertTriangle,
+      title: 'Fall Detection',
+      description: 'Real-time detection of falls and accidents at height'
     },
     {
       icon: Flame,
@@ -20,9 +20,9 @@ export function AdminHomePage() {
       description: 'Detects fire and smoke at an early stage to support rapid response and prevention'
     },
     {
-      icon: AlertTriangle,
-      title: 'Fall Detection',
-      description: 'Real-time detection of falls and accidents at height'
+      icon: Eye,
+      title: 'Face Recognition',
+      description: 'Identify authorized personnel in restricted areas and track attendance'
     }
   ];
 

@@ -27,6 +27,12 @@ import {
 const MAX_REGULATION_PDF_SIZE_MB = 25;
 const MAX_REGULATION_PDF_SIZE_BYTES = MAX_REGULATION_PDF_SIZE_MB * 1024 * 1024;
 type RegulationModuleName = 'ppe' | 'fall' | 'fire_smoke' | 'face_recognition';
+type PpeRuleCard = {
+  ids: string[];
+  title: string;
+  value: string;
+  checked: boolean;
+};
 
 const mergeRegulationLists = (
   regulations: RegulationResponse[] | undefined,
@@ -259,7 +265,7 @@ export function UploadRegulationPage() {
     }
   };
 
-  const handleRuleChange = async (ruleId: string, enabled: boolean) => {
+  const handleRuleChange = async (ruleIds: string[], enabled: boolean) => {
     const token = getAccessToken();
     if (!token) {
       showWarning('Please log in again before updating monitoring rules.');
@@ -270,11 +276,16 @@ export function UploadRegulationPage() {
       return;
     }
 
-    setSavingRuleId(ruleId);
+    setSavingRuleId(ruleIds[0]);
 
     try {
-      const response = await setRegulationRuleEnabled(currentRegulation.regulation.id, ruleId, enabled, token);
-      applyCurrentRegulation(await withSavedRegulations(response, token));
+      let response: RegulationCurrentResponse | null = null;
+      for (const ruleId of ruleIds) {
+        response = await setRegulationRuleEnabled(currentRegulation.regulation.id, ruleId, enabled, token);
+      }
+      if (response) {
+        applyCurrentRegulation(await withSavedRegulations(response, token));
+      }
     } catch (error) {
       if (isTokenError(error)) {
         handleTokenExpiry();
@@ -484,14 +495,41 @@ export function UploadRegulationPage() {
     const faceRules = byCategory('access_control');
     const isActive = (moduleRules: ExtractedRuleResponse[]) =>
       moduleRules.some((rule) => rule.status === 'active');
+    const ppeRuleMap = new Map<string, PpeRuleCard>();
+
+    ppeRules.forEach((rule) => {
+      const title = rule.required_classes[0] || rule.title.replace(/^PPE Requirement:\s*/i, '') || rule.source_excerpt || 'PPE item';
+      const extractedNames = (rule.source_excerpt || rule.title.replace(/^PPE Requirement:\s*/i, '') || title)
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean);
+      const existing = ppeRuleMap.get(title);
+
+      if (existing) {
+        existing.ids.push(rule.id);
+        existing.checked = existing.checked || rule.status === 'active';
+        const existingNames = new Set(
+          existing.value
+            .replace(/^Extracted names:\s*/i, '')
+            .split(',')
+            .map((item) => item.trim())
+            .filter(Boolean),
+        );
+        extractedNames.forEach((item) => existingNames.add(item));
+        existing.value = `Extracted names: ${Array.from(existingNames).join(', ')}`;
+        return;
+      }
+
+      ppeRuleMap.set(title, {
+        ids: [rule.id],
+        title,
+        value: `Extracted names: ${extractedNames.join(', ')}`,
+        checked: rule.status === 'active',
+      });
+    });
 
     return {
-      ppeRuleCards: ppeRules.map((rule) => ({
-        id: rule.id,
-        title: rule.required_classes[0] || rule.source_excerpt || rule.title.replace(/^PPE Requirement:\s*/i, ''),
-        value: rule.source_excerpt ? `Required PPE item: ${rule.source_excerpt}` : rule.title,
-        checked: rule.status === 'active',
-      })),
+      ppeRuleCards: Array.from(ppeRuleMap.values()),
       serviceCards: [
         {
           moduleName: 'fall' as RegulationModuleName,
@@ -749,10 +787,10 @@ export function UploadRegulationPage() {
                           <p className="text-xs uppercase tracking-[0.2em] text-[#8b7355]">PPE items</p>
                           {ppeRuleCards.length > 0 ? (
                             ppeRuleCards.map((ppeRule) => {
-                              const isSaving = savingRuleId === ppeRule.id;
+                              const isSaving = ppeRule.ids.includes(savingRuleId ?? '');
                               return (
                                 <div
-                                  key={ppeRule.id}
+                                  key={ppeRule.title}
                                   className="rounded-2xl bg-[#fff8f2] border border-[#eedfcd] p-4"
                                 >
                                   <div className="flex items-start justify-between gap-4">
@@ -765,7 +803,7 @@ export function UploadRegulationPage() {
                                         type="checkbox"
                                         checked={ppeRule.checked}
                                         disabled={isAnyActionBusy || savingModule !== null || savingRuleId !== null}
-                                        onChange={(event) => void handleRuleChange(ppeRule.id, event.target.checked)}
+                                        onChange={(event) => void handleRuleChange(ppeRule.ids, event.target.checked)}
                                         className="h-4 w-4 rounded border-[#d4bfa7] text-[#d87545] focus:ring-[#d87545] disabled:cursor-not-allowed disabled:opacity-60"
                                       />
                                       <span>{isSaving ? 'Saving...' : ppeRule.checked ? 'Active' : 'Inactive'}</span>

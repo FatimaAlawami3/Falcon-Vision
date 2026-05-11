@@ -103,6 +103,7 @@ class PPEService:
                 "class_name": det.class_name,
                 "confidence": det.confidence,
                 "bbox": det.bbox,
+                "track_id": det.track_id,
             }
             for det in detections
         ]

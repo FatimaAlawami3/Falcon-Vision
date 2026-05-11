@@ -119,6 +119,7 @@ async def _create_alert_safely(
     severity: Severity,
     image_bytes: bytes,
     bbox: list[float] | None,
+    zone_name: str | None = DEFAULT_MONITORING_ZONE,
 ) -> None:
     try:
         await alert_service.create_alert(
@@ -129,6 +130,7 @@ async def _create_alert_safely(
             severity=severity,
             image_bytes=image_bytes,
             bbox=bbox,
+            zone_name=zone_name or DEFAULT_MONITORING_ZONE,
         )
     except Exception:
         traceback.print_exc()
@@ -144,6 +146,7 @@ def _queue_alert_once(
     severity: Severity,
     image_bytes: bytes,
     bbox: list[float] | None,
+    zone_name: str | None = DEFAULT_MONITORING_ZONE,
 ) -> dict | None:
     if not organization_id:
         return None
@@ -172,6 +175,7 @@ def _queue_alert_once(
             severity=severity,
             image_bytes=image_bytes,
             bbox=bbox,
+            zone_name=zone_name or DEFAULT_MONITORING_ZONE,
         )
     )
     return {
@@ -183,7 +187,7 @@ def _queue_alert_once(
         "status": "open",
         "detected_at": detected_at.isoformat(),
         "camera_name": None,
-        "zone_name": None,
+        "zone_name": zone_name or DEFAULT_MONITORING_ZONE,
         "employee_name": None,
         "evidence_image_path": None,
         "evidence_image_data_url": evidence_image_data_url,
@@ -321,6 +325,7 @@ async def _run_safety_detection(
             severity=Severity.HIGH,
             image_bytes=file_bytes,
             bbox=matching_detection["bbox"] if matching_detection else None,
+            zone_name=effective_zone_type,
         )
         if alert is not None:
             created_alerts.append(alert)
@@ -338,6 +343,7 @@ async def _run_safety_detection(
                 severity=Severity.CRITICAL,
                 image_bytes=file_bytes,
                 bbox=fall_detection_item["bbox"],
+                zone_name=effective_zone_type,
             )
             if alert is not None:
                 created_alerts.append(alert)
@@ -357,6 +363,7 @@ async def _run_safety_detection(
                 severity=Severity.CRITICAL,
                 image_bytes=file_bytes,
                 bbox=fire_detection_item["bbox"],
+                zone_name=effective_zone_type,
             )
             if alert is not None:
                 created_alerts.append(alert)

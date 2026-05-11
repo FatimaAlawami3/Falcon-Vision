@@ -168,7 +168,8 @@ class FireDetectionService:
                 {
                     "class": d.class_name,
                     "confidence": round(d.confidence, 3),
-                    "bbox": d.bbox
+                    "bbox": d.bbox,
+                    "track_id": int(d.track_id) if d.track_id is not None else None,
                 }
                 for d in result.image_detections
             ],

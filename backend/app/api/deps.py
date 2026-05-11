@@ -154,6 +154,7 @@ def _build_regulation_service() -> RegulationService:
         ExtractedRuleRepository(get_database()),
         get_storage_client(),
         AlertRepository(get_database()),
+        UserRepository(get_database()),
     )
 
 

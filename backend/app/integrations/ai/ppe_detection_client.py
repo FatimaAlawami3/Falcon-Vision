@@ -17,6 +17,7 @@ class PPEDetection:
     bbox: List[float]  # [x1, y1, x2, y2]
     image_width: int
     image_height: int
+    track_id: int | None = None
 
 
 @dataclass
@@ -51,14 +52,25 @@ class PPEDetector:
 
     NORMALIZED_CLASS_MAP = {
         "coverall": "Coverall",
+        "protective clothing": "Coverall",
+        "protective suit": "Coverall",
+        "protective wears": "Coverall",
+        "body protection": "Coverall",
         "ear protector": "Ear Protectors",
         "ear protectors": "Ear Protectors",
+        "ear muffs": "Ear Protectors",
+        "ear plugs": "Ear Protectors",
         "face shield": "Face Shield",
+        "face shields": "Face Shield",
         "glove": "Gloves",
         "gloves": "Gloves",
+        "protective gloves": "Gloves",
         "helmet": "Helmet",
         "hard hat": "Helmet",
+        "Safety helmet": "Helmet",
         "mask": "Mask",
+        "breathing apparatus": "Mask",
+        "respiratory protection": "Mask",
         "safety glasses": "Safety Glasses",
         "goggles": "Safety Glasses",
         "safety harness": "Safety Harness",
@@ -69,6 +81,7 @@ class PPEDetector:
         "vest": "Safety Vest",
         "high visibility vest": "Safety Vest",
         "hi vis vest": "Safety Vest",
+        "reflective vest": "Safety Vest"
     }
 
     def __init__(self, model_path: str | Path, use_clip: bool = True):
@@ -118,13 +131,26 @@ class PPEDetector:
         """
         height, width = image.shape[:2]
 
-        # Run inference
-        results = self.model(image, imgsz=image_size, conf=confidence_threshold, verbose=False)
+        # Run persistent object tracking so the same object keeps a stable ID across frames.
+        results = self.model.track(
+            source=image,
+            persist=True,
+            tracker="bytetrack.yaml",
+            imgsz=image_size,
+            conf=confidence_threshold,
+            verbose=False,
+        )
 
         detections = []
         for result in results:
             if result.boxes is not None:
-                for box in result.boxes:
+                track_ids = (
+                    result.boxes.id.cpu().numpy().astype(int).tolist()
+                    if getattr(result.boxes, "id", None) is not None
+                    else []
+                )
+
+                for index, box in enumerate(result.boxes):
                     # Get bounding box coordinates
                     bbox = box.xyxy[0].cpu().numpy()  # [x1, y1, x2, y2]
 
@@ -144,7 +170,8 @@ class PPEDetector:
                         confidence=confidence,
                         bbox=bbox.tolist(),
                         image_width=width,
-                        image_height=height
+                        image_height=height,
+                        track_id=track_ids[index] if index < len(track_ids) else None,
                     )
                     detections.append(detection)
 

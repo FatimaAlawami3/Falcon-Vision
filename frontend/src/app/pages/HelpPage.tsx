@@ -57,11 +57,11 @@ export function HelpPage() {
   return (
     <div className="min-h-screen flex flex-col bg-[#fde8d8] overflow-x-hidden">
       <nav className="bg-white shadow-sm border-b border-[#e0d5c7]">
-        <div className="w-full max-w-7xl mx-auto px-4 sm:px-6">
-          <div className="flex justify-between items-center h-16">
-            <Link to={homePath} className="flex min-w-0 items-center gap-2">
-              <img src={logoImage} alt="Falcon Vision Logo" className="w-10 h-10 sm:w-12 sm:h-12 flex-shrink-0" />
-              <span className="font-serif text-lg sm:text-xl text-[#d87545] truncate">Falcon Vision</span>
+        <div className="max-w-7xl mx-auto px-6">
+          <div className="flex justify-between items-center h-14">
+            <Link to={homePath} className="flex min-w-0 items-center space-x-2">
+              <img src={logoImage} alt="Falcon Vision Logo" className="w-10 h-10 flex-shrink-0" />
+              <span className="font-serif text-lg text-[#d87545] truncate">Falcon Vision</span>
             </Link>
           </div>
         </div>

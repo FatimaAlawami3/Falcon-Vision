@@ -21,6 +21,7 @@ class PersonDetection:
     keypoints: np.ndarray  # Array of (x, y) coordinates
     is_fallen: bool
     confidence: float
+    track_id: int | None = None
 
 
 class FallDetector:
@@ -54,8 +55,10 @@ class FallDetector:
             List of person detections with fall status
         """
         # Run pose estimation
-        results = self.pose_model.predict(
+        results = self.pose_model.track(
             source=image,
+            persist=True,
+            tracker="bytetrack.yaml",
             imgsz=image_size,
             conf=confidence_threshold,
             verbose=False
@@ -69,6 +72,11 @@ class FallDetector:
                 continue
 
             boxes = result.boxes.xyxy.cpu().numpy()
+            track_ids = (
+                result.boxes.id.cpu().numpy().astype(int).tolist()
+                if getattr(result.boxes, "id", None) is not None
+                else []
+            )
             keypoints = result.keypoints.xy.cpu().numpy()
             keypoint_confidences = (
                 result.keypoints.conf.cpu().numpy()
@@ -85,13 +93,15 @@ class FallDetector:
 
                 # Check if fall can be detected (keypoints available)
                 is_fallen = self._classify_person(kp, bbox=bbox, keypoint_confidences=kp_conf)
+                track_id = track_ids[i] if i < len(track_ids) else None
 
                 detection = PersonDetection(
-                    person_id=person_id,
+                    person_id=track_id if track_id is not None else person_id,
                     bbox=bbox.tolist(),
                     keypoints=kp,
                     is_fallen=is_fallen,
-                    confidence=float(result.boxes.conf[i].cpu().numpy())
+                    confidence=float(result.boxes.conf[i].cpu().numpy()),
+                    track_id=track_id,
                 )
                 detections.append(detection)
                 person_id += 1

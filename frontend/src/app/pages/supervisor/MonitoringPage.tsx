@@ -21,6 +21,7 @@ import {
   type FallDetectionResponse,
   type FireDetectionResponse,
   getFaceRecognitionStatus,
+  getCurrentRegulation,
   getMonitoringSafetyWebSocketUrl,
   listAlerts,
   type MonitoringSessionReportDocument,
@@ -29,25 +30,30 @@ import {
   recognizeEmployeeFaces,
 } from '../../lib/api';
 
-const TRACKING_MIN_INTERVAL_MS = 16;
-const TRACKING_SMOOTHING_FACTOR = 0.7;
+const TRACKING_MIN_INTERVAL_MS = 8;
+const TRACKING_SMOOTHING_FACTOR = 0.6;
 const TRACKING_BOX_MAX_AGE_MS = 100;
-const OVERLAY_SMOOTHING_FACTOR = 0.65;
-const OVERLAY_MATCH_DISTANCE_THRESHOLD = 0.45;
-const OVERLAY_MATCH_IOU_THRESHOLD = 0.3;
-const OVERLAY_DUPLICATE_IOU_THRESHOLD = 0;
-const OVERLAY_DUPLICATE_CENTER_THRESHOLD = 0.18;
+const OVERLAY_MOVING_TRACK_MAX_MISSING_MS = 900;
+const OVERLAY_STATIONARY_TRACK_MAX_MISSING_MS = 1500;
+const OVERLAY_PREDICTION_MAX_MS = 120;
+const OVERLAY_SMOOTHING_FACTOR = 0.7;
+const OVERLAY_MOTION_IMMEDIATE_CATCHUP = 0.92;
+const OVERLAY_MATCH_DISTANCE_THRESHOLD = 1.4;
+const OVERLAY_MATCH_IOU_THRESHOLD = 0.01;
+const OVERLAY_MOTION_CENTER_EPSILON = 0.003;
+const OVERLAY_MOTION_SIZE_EPSILON = 0.01;
+const OVERLAY_DUPLICATE_IOU_THRESHOLD = 0.40;
+const OVERLAY_DUPLICATE_CENTER_THRESHOLD = 0.22;
 const PPE_OVERLAY_MIN_CONFIDENCE = 0.45;
-const PPE_NEGATIVE_OVERLAY_MIN_CONFIDENCE = 0.6;
-const NO_GLOVES_OVERLAY_MIN_CONFIDENCE = 0.70;
+const PPE_NEGATIVE_OVERLAY_MIN_CONFIDENCE = 0.5;
 const DEFAULT_MONITORING_ZONE = 'production';
-const MAX_INFERENCE_FRAME_WIDTH = 640;
-const INFERENCE_JPEG_QUALITY = 0.5;
-const FRAME_LOOP_INTERVAL_MS = 40;
-const SAFETY_DETECTION_FRAME_SKIP = 2;
-const FACE_DETECTION_INTERVAL_MS = 1200;
-const HAZARD_DETECTION_INTERVAL_MS = 1200;
-const DETECTION_WARMUP_MS = 2000;
+const MAX_INFERENCE_FRAME_WIDTH = 320;
+const INFERENCE_JPEG_QUALITY = 0.35;
+const FRAME_LOOP_INTERVAL_MS = 6;
+const SAFETY_DETECTION_FRAME_SKIP = 1;
+const FACE_DETECTION_INTERVAL_MS = 700;
+const HAZARD_DETECTION_INTERVAL_MS = 900;
+const DETECTION_WARMUP_MS = 200;
 
 type AlertRow = {
   id: string;
@@ -62,16 +68,18 @@ type AlertRow = {
 
 type AlertGroup = 'critical' | 'compliance' | 'other';
 
-type DetectionOverlay = {
+type OverlayTrack = {
+  trackId: string;
+  backendTrackId?: string | number | null;
   id: string;
   label: string;
   confidence?: number;
   borderColor: string;
   badgeColor: string;
-  x1: number;
-  y1: number;
-  x2: number;
-  y2: number;
+  currentX1: number;
+  currentY1: number;
+  currentX2: number;
+  currentY2: number;
   sourceWidth: number;
   sourceHeight: number;
   targetX1: number;
@@ -79,6 +87,9 @@ type DetectionOverlay = {
   targetX2: number;
   targetY2: number;
   lastSeenAt: number;
+  lastUpdatedAt: number;
+  velocityX: number;
+  velocityY: number;
 };
 
 type LocalFaceBox = {
@@ -120,10 +131,27 @@ type CapturedVideoFrame = {
 
 type SafetyModule = 'ppe' | 'fall' | 'fire';
 
-type PendingDetectionOverlay = Omit<
-  DetectionOverlay,
-  'targetX1' | 'targetY1' | 'targetX2' | 'targetY2' | 'lastSeenAt'
->;
+type OverlayDetection = {
+  id: string;
+  backendTrackId?: string | number | null;
+  label: string;
+  confidence?: number;
+  borderColor: string;
+  badgeColor: string;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  sourceWidth: number;
+  sourceHeight: number;
+};
+
+type RegulationSetupState = {
+  status: 'checking' | 'ready' | 'missing';
+  adminName?: string | null;
+};
+
+let nextOverlayTrackNumber = 1;
 
 function clampCoordinate(value: number, min: number, max: number) {
   if (!Number.isFinite(value)) {
@@ -151,10 +179,6 @@ function normalizeDetectionBox(
 
 function getPpeOverlayMinConfidence(className: string) {
   const normalizedClassName = className.trim().toLowerCase();
-
-  if (normalizedClassName === 'no gloves') {
-    return NO_GLOVES_OVERLAY_MIN_CONFIDENCE;
-  }
 
   if (normalizedClassName.startsWith('no ')) {
     return PPE_NEGATIVE_OVERLAY_MIN_CONFIDENCE;
@@ -258,7 +282,7 @@ function getFaceOverlayLabel(result: FaceRecognitionResponse) {
 }
 
 function getOverlayStyle(
-  box: DetectionOverlay,
+  box: OverlayTrack,
   video: HTMLVideoElement | null,
 ) {
   if (box.sourceWidth <= 0 || box.sourceHeight <= 0 || !video) {
@@ -281,10 +305,10 @@ function getOverlayStyle(
   const offsetY = (containerHeight - renderedHeight) / 2;
 
   return {
-    left: `${offsetX + box.x1 * scale}px`,
-    top: `${offsetY + box.y1 * scale}px`,
-    width: `${Math.max(box.x2 - box.x1, 0) * scale}px`,
-    height: `${Math.max(box.y2 - box.y1, 0) * scale}px`,
+    left: `${offsetX + box.currentX1 * scale}px`,
+    top: `${offsetY + box.currentY1 * scale}px`,
+    width: `${Math.max(box.currentX2 - box.currentX1, 0) * scale}px`,
+    height: `${Math.max(box.currentY2 - box.currentY1, 0) * scale}px`,
   };
 }
 
@@ -378,39 +402,22 @@ function getOverlayPalette(label: string) {
   };
 }
 
-function getOverlayCenterDistance(a: DetectionOverlay, b: DetectionOverlay) {
-  const centerAX = (a.targetX1 + a.targetX2) / 2;
-  const centerAY = (a.targetY1 + a.targetY2) / 2;
-  const centerBX = (b.targetX1 + b.targetX2) / 2;
-  const centerBY = (b.targetY1 + b.targetY2) / 2;
-
-  const dx = centerAX - centerBX;
-  const dy = centerAY - centerBY;
-  const distance = Math.sqrt(dx * dx + dy * dy);
-  const diagonal = Math.sqrt(
-    a.sourceWidth * a.sourceWidth +
-    a.sourceHeight * a.sourceHeight,
-  );
-
-  return diagonal > 0 ? distance / diagonal : Number.POSITIVE_INFINITY;
-}
-
-function getOverlayIntersectionRatio(a: DetectionOverlay, b: DetectionOverlay) {
-  const x1 = Math.max(a.targetX1, b.targetX1);
-  const y1 = Math.max(a.targetY1, b.targetY1);
-  const x2 = Math.min(a.targetX2, b.targetX2);
-  const y2 = Math.min(a.targetY2, b.targetY2);
+function getOverlayIntersectionRatio(a: OverlayTrack, b: OverlayTrack) {
+  const x1 = Math.max(a.currentX1, b.currentX1);
+  const y1 = Math.max(a.currentY1, b.currentY1);
+  const x2 = Math.min(a.currentX2, b.currentX2);
+  const y2 = Math.min(a.currentY2, b.currentY2);
   const intersectionWidth = Math.max(0, x2 - x1);
   const intersectionHeight = Math.max(0, y2 - y1);
   const intersectionArea = intersectionWidth * intersectionHeight;
-  const areaA = Math.max(0, a.targetX2 - a.targetX1) * Math.max(0, a.targetY2 - a.targetY1);
-  const areaB = Math.max(0, b.targetX2 - b.targetX1) * Math.max(0, b.targetY2 - b.targetY1);
+  const areaA = Math.max(0, a.currentX2 - a.currentX1) * Math.max(0, a.currentY2 - a.currentY1);
+  const areaB = Math.max(0, b.currentX2 - b.currentX1) * Math.max(0, b.currentY2 - b.currentY1);
   const unionArea = areaA + areaB - intersectionArea;
 
   return unionArea > 0 ? intersectionArea / unionArea : 0;
 }
 
-function getPendingOverlayCenterDistance(a: PendingDetectionOverlay, b: PendingDetectionOverlay) {
+function getPendingOverlayCenterDistance(a: OverlayDetection, b: OverlayDetection) {
   const centerAX = (a.x1 + a.x2) / 2;
   const centerAY = (a.y1 + a.y2) / 2;
   const centerBX = (b.x1 + b.x2) / 2;
@@ -421,7 +428,7 @@ function getPendingOverlayCenterDistance(a: PendingDetectionOverlay, b: PendingD
   return diagonal > 0 ? distance / diagonal : Number.POSITIVE_INFINITY;
 }
 
-function getPendingOverlayIntersectionRatio(a: PendingDetectionOverlay, b: PendingDetectionOverlay) {
+function getPendingOverlayIntersectionRatio(a: OverlayDetection, b: OverlayDetection) {
   const x1 = Math.max(a.x1, b.x1);
   const y1 = Math.max(a.y1, b.y1);
   const x2 = Math.min(a.x2, b.x2);
@@ -436,12 +443,27 @@ function getPendingOverlayIntersectionRatio(a: PendingDetectionOverlay, b: Pendi
   return unionArea > 0 ? intersectionArea / unionArea : 0;
 }
 
-function dedupeIncomingDetectionOverlays(overlays: PendingDetectionOverlay[]) {
-  const sortedOverlays = [...overlays].sort((a, b) => b.confidence - a.confidence);
-  const keptOverlays: PendingDetectionOverlay[] = [];
+function getOverlayBackendTrackKey(overlay: Pick<OverlayTrack | OverlayDetection, 'id' | 'backendTrackId'>) {
+  if (overlay.backendTrackId === undefined || overlay.backendTrackId === null || overlay.backendTrackId === '') {
+    return null;
+  }
+
+  return `${getOverlayKind(overlay)}-${String(overlay.backendTrackId)}`;
+}
+
+function dedupeOverlayDetections(overlays: OverlayDetection[]) {
+  const sortedOverlays = [...overlays].sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0));
+  const keptOverlays: OverlayDetection[] = [];
 
   sortedOverlays.forEach((overlay) => {
     const isDuplicate = keptOverlays.some((keptOverlay) => {
+      const keptBackendTrackKey = getOverlayBackendTrackKey(keptOverlay);
+      const overlayBackendTrackKey = getOverlayBackendTrackKey(overlay);
+
+      if (keptBackendTrackKey && overlayBackendTrackKey && keptBackendTrackKey !== overlayBackendTrackKey) {
+        return false;
+      }
+
       if (
         keptOverlay.label !== overlay.label ||
         keptOverlay.sourceWidth !== overlay.sourceWidth ||
@@ -464,100 +486,323 @@ function dedupeIncomingDetectionOverlays(overlays: PendingDetectionOverlay[]) {
   return keptOverlays;
 }
 
-function createTrackedOverlay(
-  overlay: PendingDetectionOverlay,
+function createOverlayTrack(
+  overlay: OverlayDetection,
   now: number,
-): DetectionOverlay {
+): OverlayTrack {
+  const backendTrackKey = getOverlayBackendTrackKey(overlay);
+
   return {
-    ...overlay,
+    trackId: backendTrackKey ? `backend-${backendTrackKey}` : `track-${nextOverlayTrackNumber++}`,
+    backendTrackId: overlay.backendTrackId,
+    id: overlay.id,
+    label: overlay.label,
+    confidence: overlay.confidence,
+    borderColor: overlay.borderColor,
+    badgeColor: overlay.badgeColor,
+    currentX1: overlay.x1,
+    currentY1: overlay.y1,
+    currentX2: overlay.x2,
+    currentY2: overlay.y2,
+    sourceWidth: overlay.sourceWidth,
+    sourceHeight: overlay.sourceHeight,
     targetX1: overlay.x1,
     targetY1: overlay.y1,
     targetX2: overlay.x2,
     targetY2: overlay.y2,
     lastSeenAt: now,
+    lastUpdatedAt: now,
+    velocityX: 0,
+    velocityY: 0,
   };
 }
 
-function reconcileDetectionOverlays(
-  current: DetectionOverlay[],
-  incoming: PendingDetectionOverlay[],
+function getOverlayKind(overlay: Pick<OverlayTrack | OverlayDetection, 'id'>) {
+  return overlay.id.split('-')[0] || overlay.id;
+}
+
+function shouldDedupeOverlayTrack(a: OverlayTrack, b: OverlayTrack) {
+  const backendTrackKeyA = getOverlayBackendTrackKey(a);
+  const backendTrackKeyB = getOverlayBackendTrackKey(b);
+
+  if (backendTrackKeyA && backendTrackKeyB && backendTrackKeyA !== backendTrackKeyB) {
+    return false;
+  }
+
+  const kindA = getOverlayKind(a);
+  const kindB = getOverlayKind(b);
+
+  if (
+    kindA !== kindB ||
+    a.sourceWidth !== b.sourceWidth ||
+    a.sourceHeight !== b.sourceHeight
+  ) {
+    return false;
+  }
+
+  return kindA === 'face' || a.label === b.label;
+}
+
+function isCompatibleTrackDetection(track: OverlayTrack, detection: OverlayDetection) {
+  if (
+    track.sourceWidth !== detection.sourceWidth ||
+    track.sourceHeight !== detection.sourceHeight
+  ) {
+    return false;
+  }
+
+  const trackKind = getOverlayKind(track);
+  const detectionKind = getOverlayKind(detection);
+
+  if (trackKind !== detectionKind) {
+    return false;
+  }
+
+  const trackBackendTrackKey = getOverlayBackendTrackKey(track);
+  const detectionBackendTrackKey = getOverlayBackendTrackKey(detection);
+
+  if (trackBackendTrackKey && detectionBackendTrackKey) {
+    return trackBackendTrackKey === detectionBackendTrackKey;
+  }
+
+  return trackKind === 'face' || track.label === detection.label;
+}
+
+function getOverlayDisplayCenter(overlay: Pick<OverlayTrack, 'currentX1' | 'currentY1' | 'currentX2' | 'currentY2'>) {
+  return {
+    x: (overlay.currentX1 + overlay.currentX2) / 2,
+    y: (overlay.currentY1 + overlay.currentY2) / 2,
+  };
+}
+
+function getDetectionCenter(overlay: Pick<OverlayDetection, 'x1' | 'y1' | 'x2' | 'y2'>) {
+  return {
+    x: (overlay.x1 + overlay.x2) / 2,
+    y: (overlay.y1 + overlay.y2) / 2,
+  };
+}
+
+function getTrackDetectionCenterDistance(track: OverlayTrack, detection: OverlayDetection) {
+  const trackCenter = getOverlayDisplayCenter(track);
+  const detectionCenter = getDetectionCenter(detection);
+  const distance = Math.hypot(trackCenter.x - detectionCenter.x, trackCenter.y - detectionCenter.y);
+  const diagonal = Math.hypot(track.sourceWidth, track.sourceHeight);
+
+  return diagonal > 0 ? distance / diagonal : Number.POSITIVE_INFINITY;
+}
+
+function getTrackDetectionIntersectionRatio(track: OverlayTrack, detection: OverlayDetection) {
+  const x1 = Math.max(track.currentX1, detection.x1);
+  const y1 = Math.max(track.currentY1, detection.y1);
+  const x2 = Math.min(track.currentX2, detection.x2);
+  const y2 = Math.min(track.currentY2, detection.y2);
+  const intersectionWidth = Math.max(0, x2 - x1);
+  const intersectionHeight = Math.max(0, y2 - y1);
+  const intersectionArea = intersectionWidth * intersectionHeight;
+  const trackArea = Math.max(0, track.currentX2 - track.currentX1) * Math.max(0, track.currentY2 - track.currentY1);
+  const detectionArea = Math.max(0, detection.x2 - detection.x1) * Math.max(0, detection.y2 - detection.y1);
+  const unionArea = trackArea + detectionArea - intersectionArea;
+
+  return unionArea > 0 ? intersectionArea / unionArea : 0;
+}
+
+function getTrackDetectionMotion(track: OverlayTrack, detection: OverlayDetection) {
+  const trackCenter = getOverlayDisplayCenter(track);
+  const detectionCenter = getDetectionCenter(detection);
+  const diagonal = Math.hypot(track.sourceWidth, track.sourceHeight);
+  const centerDelta = diagonal > 0
+    ? Math.hypot(trackCenter.x - detectionCenter.x, trackCenter.y - detectionCenter.y) / diagonal
+    : Number.POSITIVE_INFINITY;
+  const trackWidth = Math.max(1, track.currentX2 - track.currentX1);
+  const trackHeight = Math.max(1, track.currentY2 - track.currentY1);
+  const detectionWidth = Math.max(1, detection.x2 - detection.x1);
+  const detectionHeight = Math.max(1, detection.y2 - detection.y1);
+  const widthDelta = Math.abs(detectionWidth - trackWidth) / trackWidth;
+  const heightDelta = Math.abs(detectionHeight - trackHeight) / trackHeight;
+  const sizeDelta = Math.max(widthDelta, heightDelta);
+
+  return {
+    centerDelta,
+    hasMeaningfulMotion:
+      centerDelta > OVERLAY_MOTION_CENTER_EPSILON ||
+      sizeDelta > OVERLAY_MOTION_SIZE_EPSILON,
+  };
+}
+
+function getTrackSpeed(track: Pick<OverlayTrack, 'velocityX' | 'velocityY'>) {
+  return Math.hypot(track.velocityX, track.velocityY);
+}
+
+function getTrackMissingTimeoutMs(track: OverlayTrack) {
+  return getTrackSpeed(track) > 0
+    ? OVERLAY_MOVING_TRACK_MAX_MISSING_MS
+    : OVERLAY_STATIONARY_TRACK_MAX_MISSING_MS;
+}
+
+function keepLiveOverlayTracks(overlays: OverlayTrack[], now: number) {
+  return overlays.filter((overlay) => now - overlay.lastSeenAt <= getTrackMissingTimeoutMs(overlay));
+}
+
+function advanceOverlayTrack(overlay: OverlayTrack, now: number): OverlayTrack | null {
+  const ageMs = now - overlay.lastSeenAt;
+  const missingTimeoutMs = getTrackMissingTimeoutMs(overlay);
+
+  if (ageMs > missingTimeoutMs) {
+    return null;
+  }
+
+  // Box was seen recently — interpolate toward target
+  if (ageMs <= 100) {
+    const predictionMs = Math.min(ageMs, OVERLAY_PREDICTION_MAX_MS);
+    const predictedX1 = overlay.targetX1 + overlay.velocityX * predictionMs;
+    const predictedY1 = overlay.targetY1 + overlay.velocityY * predictionMs;
+    const predictedX2 = overlay.targetX2 + overlay.velocityX * predictionMs;
+    const predictedY2 = overlay.targetY2 + overlay.velocityY * predictionMs;
+    const alpha = OVERLAY_SMOOTHING_FACTOR;
+
+    return {
+      ...overlay,
+      currentX1: overlay.currentX1 + (predictedX1 - overlay.currentX1) * alpha,
+      currentY1: overlay.currentY1 + (predictedY1 - overlay.currentY1) * alpha,
+      currentX2: overlay.currentX2 + (predictedX2 - overlay.currentX2) * alpha,
+      currentY2: overlay.currentY2 + (predictedY2 - overlay.currentY2) * alpha,
+      lastUpdatedAt: now,
+    };
+  }
+
+  // Box is stale — hold perfectly still, do not drift
+  return overlay;
+}
+
+function reconcileTracks(
+  current: OverlayTrack[],
+  incoming: OverlayDetection[],
   now: number,
 ) {
   const usedCurrentIndexes = new Set<number>();
-  const nextOverlays: DetectionOverlay[] = [];
+  const nextOverlays: OverlayTrack[] = [];
 
-  incoming.forEach((overlay, incomingIndex) => {
-    const nextOverlay = createTrackedOverlay(overlay, now);
+  incoming.forEach((overlay) => {
     let bestMatchIndex = -1;
-    let bestMatchDistance = Number.POSITIVE_INFINITY;
+    let bestMatchScore = Number.POSITIVE_INFINITY;
 
     current.forEach((existing, currentIndex) => {
       if (usedCurrentIndexes.has(currentIndex)) {
         return;
       }
 
-      if (
-        existing.label !== nextOverlay.label ||
-        existing.sourceWidth !== nextOverlay.sourceWidth ||
-        existing.sourceHeight !== nextOverlay.sourceHeight
-      ) {
+      if (!isCompatibleTrackDetection(existing, overlay)) {
         return;
       }
 
-      const distance = getOverlayCenterDistance(existing, nextOverlay);
-      const overlap = getOverlayIntersectionRatio(existing, nextOverlay);
-      if (overlap >= OVERLAY_MATCH_IOU_THRESHOLD && distance < bestMatchDistance) {
-        bestMatchDistance = distance;
+      const existingBackendTrackKey = getOverlayBackendTrackKey(existing);
+      const overlayBackendTrackKey = getOverlayBackendTrackKey(overlay);
+
+      if (existingBackendTrackKey && overlayBackendTrackKey && existingBackendTrackKey === overlayBackendTrackKey) {
+        bestMatchScore = Number.NEGATIVE_INFINITY;
         bestMatchIndex = currentIndex;
         return;
       }
 
-      if (bestMatchIndex < 0 && distance < bestMatchDistance) {
-        bestMatchDistance = distance;
+      const distance = getTrackDetectionCenterDistance(existing, overlay);
+      const overlap = getTrackDetectionIntersectionRatio(existing, overlay);
+      const isTrackCandidate =
+        distance <= OVERLAY_MATCH_DISTANCE_THRESHOLD ||
+        overlap >= OVERLAY_MATCH_IOU_THRESHOLD;
+
+      if (!isTrackCandidate) {
+        return;
+      }
+
+      // Weighted score: distance penalised, overlap rewarded.
+      // Lower is better. Cap distance contribution so a fast-
+      // moving box doesn't get orphaned just because it moved.
+      const cappedDistance = Math.min(distance, OVERLAY_MATCH_DISTANCE_THRESHOLD);
+      const score = cappedDistance * 1.5 - overlap * 2.0;
+      if (score < bestMatchScore) {
+        bestMatchScore = score;
         bestMatchIndex = currentIndex;
       }
     });
 
-    if (bestMatchIndex >= 0 && bestMatchDistance <= OVERLAY_MATCH_DISTANCE_THRESHOLD) {
+    if (bestMatchIndex >= 0) {
       usedCurrentIndexes.add(bestMatchIndex);
       const previous = current[bestMatchIndex];
+      const elapsedMs = Math.max(now - previous.lastSeenAt, TRACKING_MIN_INTERVAL_MS);
+      const previousCenter = getOverlayDisplayCenter(previous);
+      const nextCenter = getDetectionCenter(overlay);
+      const motion = getTrackDetectionMotion(previous, overlay);
+      const nextVelocityX = motion.hasMeaningfulMotion
+        ? (nextCenter.x - previousCenter.x) / elapsedMs
+        : 0;
+      const nextVelocityY = motion.hasMeaningfulMotion
+        ? (nextCenter.y - previousCenter.y) / elapsedMs
+        : 0;
+      const nextCurrentX1 = motion.hasMeaningfulMotion
+        ? previous.currentX1 + (overlay.x1 - previous.currentX1) * OVERLAY_MOTION_IMMEDIATE_CATCHUP
+        : previous.currentX1;
+      const nextCurrentY1 = motion.hasMeaningfulMotion
+        ? previous.currentY1 + (overlay.y1 - previous.currentY1) * OVERLAY_MOTION_IMMEDIATE_CATCHUP
+        : previous.currentY1;
+      const nextCurrentX2 = motion.hasMeaningfulMotion
+        ? previous.currentX2 + (overlay.x2 - previous.currentX2) * OVERLAY_MOTION_IMMEDIATE_CATCHUP
+        : previous.currentX2;
+      const nextCurrentY2 = motion.hasMeaningfulMotion
+        ? previous.currentY2 + (overlay.y2 - previous.currentY2) * OVERLAY_MOTION_IMMEDIATE_CATCHUP
+        : previous.currentY2;
       nextOverlays.push({
         ...previous,
-        id: previous.id || nextOverlay.id || `${nextOverlay.label}-${incomingIndex}`,
-        confidence: nextOverlay.confidence,
-        borderColor: nextOverlay.borderColor,
-        badgeColor: nextOverlay.badgeColor,
-        x1: previous.x1 + (nextOverlay.x1 - previous.x1) * OVERLAY_SMOOTHING_FACTOR,
-        y1: previous.y1 + (nextOverlay.y1 - previous.y1) * OVERLAY_SMOOTHING_FACTOR,
-        x2: previous.x2 + (nextOverlay.x2 - previous.x2) * OVERLAY_SMOOTHING_FACTOR,
-        y2: previous.y2 + (nextOverlay.y2 - previous.y2) * OVERLAY_SMOOTHING_FACTOR,
-        sourceWidth: nextOverlay.sourceWidth,
-        sourceHeight: nextOverlay.sourceHeight,
-        targetX1: nextOverlay.x1,
-        targetY1: nextOverlay.y1,
-        targetX2: nextOverlay.x2,
-        targetY2: nextOverlay.y2,
+        backendTrackId: overlay.backendTrackId ?? previous.backendTrackId,
+        id: previous.id,
+        label: overlay.label,
+        confidence: overlay.confidence,
+        borderColor: overlay.borderColor,
+        badgeColor: overlay.badgeColor,
+        currentX1: nextCurrentX1,
+        currentY1: nextCurrentY1,
+        currentX2: nextCurrentX2,
+        currentY2: nextCurrentY2,
+        sourceWidth: overlay.sourceWidth,
+        sourceHeight: overlay.sourceHeight,
+        targetX1: motion.hasMeaningfulMotion ? overlay.x1 : previous.targetX1,
+        targetY1: motion.hasMeaningfulMotion ? overlay.y1 : previous.targetY1,
+        targetX2: motion.hasMeaningfulMotion ? overlay.x2 : previous.targetX2,
+        targetY2: motion.hasMeaningfulMotion ? overlay.y2 : previous.targetY2,
         lastSeenAt: now,
+        lastUpdatedAt: now,
+        velocityX: nextVelocityX,
+        velocityY: nextVelocityY,
       });
       return;
     }
 
-    nextOverlays.push(nextOverlay);
+    nextOverlays.push(createOverlayTrack(overlay, now));
   });
 
-  return nextOverlays.filter((overlay, overlayIndex) => {
+  current.forEach((overlay, currentIndex) => {
+    if (!usedCurrentIndexes.has(currentIndex) && now - overlay.lastSeenAt <= getTrackMissingTimeoutMs(overlay)) {
+      nextOverlays.push(overlay);
+    }
+  });
+
+  return keepLiveOverlayTracks(nextOverlays, now).filter((overlay, overlayIndex) => {
     const newerDuplicateIndex = nextOverlays.findIndex(
       (candidate, candidateIndex) =>
         candidateIndex > overlayIndex &&
-        candidate.label === overlay.label &&
-        candidate.sourceWidth === overlay.sourceWidth &&
-        candidate.sourceHeight === overlay.sourceHeight &&
+        shouldDedupeOverlayTrack(candidate, overlay) &&
         getOverlayIntersectionRatio(candidate, overlay) > OVERLAY_DUPLICATE_IOU_THRESHOLD,
     );
 
     return newerDuplicateIndex < 0;
   });
 }
+
+const TrackManager = {
+  advanceTrack: advanceOverlayTrack,
+  dedupeDetections: dedupeOverlayDetections,
+  keepLiveTracks: keepLiveOverlayTracks,
+  reconcileTracks,
+};
 
 function getLargestDetectedFace(detections: BrowserDetectedFace[]) {
   if (!detections.length) {
@@ -842,9 +1087,13 @@ export function MonitoringPage() {
   const [isFaceRecognitionActive, setIsFaceRecognitionActive] = useState(true);
   const [activeSafetyModules, setActiveSafetyModules] = useState<SafetyModule[]>(['ppe', 'fall', 'fire']);
   const [alerts, setAlerts] = useState<AlertRow[]>([]);
-  const [detectionOverlays, setDetectionOverlays] = useState<DetectionOverlay[]>([]);
+  const [overlayTracks, setOverlayTracks] = useState<OverlayTrack[]>([]);
   const [sessionStartedAt, setSessionStartedAt] = useState<string | null>(null);
   const [isSavingReport, setIsSavingReport] = useState(false);
+  const [regulationSetupState, setRegulationSetupState] = useState<RegulationSetupState>({
+    status: isAdminView ? 'ready' : 'checking',
+    adminName: null,
+  });
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -852,6 +1101,7 @@ export function MonitoringPage() {
   const trackingInFlightRef = useRef(false);
   const faceDetectorRef = useRef<BrowserFaceDetector | null>(null);
   const trackingFrameRef = useRef<number | null>(null);
+  const overlayAnimationFrameRef = useRef<number | null>(null);
   const lastTrackingRunAtRef = useRef(0);
   const lastTrackedFaceBoxRef = useRef<LocalFaceBox | null>(null);
   const lastTrackedFaceAtRef = useRef(0);
@@ -1023,6 +1273,10 @@ export function MonitoringPage() {
       window.cancelAnimationFrame(trackingFrameRef.current);
       trackingFrameRef.current = null;
     }
+    if (overlayAnimationFrameRef.current !== null) {
+      window.cancelAnimationFrame(overlayAnimationFrameRef.current);
+      overlayAnimationFrameRef.current = null;
+    }
     trackingInFlightRef.current = false;
     lastTrackingRunAtRef.current = 0;
     lastTrackedFaceBoxRef.current = null;
@@ -1047,7 +1301,7 @@ export function MonitoringPage() {
     setIsLocalTrackingEnabled(false);
     setIsStreaming(false);
     setIsRecognizing(false);
-    setDetectionOverlays([]);
+    setOverlayTracks([]);
     setIsSavingReport(false);
     detectorInFlightRef.current = {
       face: false,
@@ -1084,6 +1338,70 @@ export function MonitoringPage() {
       faceDetectorRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    if (isAdminView) {
+      setRegulationSetupState({ status: 'ready', adminName: null });
+      return;
+    }
+
+    const token = getAccessToken();
+    if (!token) {
+      return;
+    }
+
+    let isCancelled = false;
+    setRegulationSetupState((current) => ({
+      status: current.status === 'missing' ? 'missing' : 'checking',
+      adminName: current.adminName ?? null,
+    }));
+
+    getCurrentRegulation(token)
+      .then((response) => {
+        if (isCancelled) {
+          return;
+        }
+
+        if (!response.regulation || response.summary.total_rules <= 0) {
+          stopCameraStream();
+          setRegulationSetupState({
+            status: 'missing',
+            adminName: response.admin_name ?? null,
+          });
+          return;
+        }
+
+        setRegulationSetupState({
+          status: 'ready',
+          adminName: response.admin_name ?? null,
+        });
+      })
+      .catch((error) => {
+        if (isCancelled) {
+          return;
+        }
+
+        if (isTokenError(error)) {
+          clearAuthSession();
+          setModalState({
+            isOpen: true,
+            title: 'Session Expired',
+            message: 'Your login session expired. Please log in again.',
+          });
+          window.setTimeout(() => {
+            window.location.href = '/login';
+          }, 300);
+          return;
+        }
+
+        stopCameraStream();
+        setRegulationSetupState({ status: 'missing', adminName: null });
+      });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [isAdminView]);
 
   useEffect(() => {
     if (!isStreaming) {
@@ -1146,6 +1464,45 @@ export function MonitoringPage() {
       video.removeEventListener('canplay', handleReady);
     };
   }, [isStreaming]);
+
+  useEffect(() => {
+    if (!isStreaming || !hasLiveVideo) {
+      return;
+    }
+
+    let isCancelled = false;
+
+    const animateOverlays = () => {
+      if (isCancelled) {
+        return;
+      }
+
+      const now = performance.now();
+      setOverlayTracks((current) => {
+        if (current.length === 0) {
+          return current;
+        }
+
+        const advanced = current
+          .map((overlay) => TrackManager.advanceTrack(overlay, now))
+          .filter((overlay): overlay is OverlayTrack => Boolean(overlay));
+
+        return advanced;
+      });
+
+      overlayAnimationFrameRef.current = window.requestAnimationFrame(animateOverlays);
+    };
+
+    overlayAnimationFrameRef.current = window.requestAnimationFrame(animateOverlays);
+
+    return () => {
+      isCancelled = true;
+      if (overlayAnimationFrameRef.current !== null) {
+        window.cancelAnimationFrame(overlayAnimationFrameRef.current);
+        overlayAnimationFrameRef.current = null;
+      }
+    };
+  }, [isStreaming, hasLiveVideo]);
 
   useEffect(() => {
     if (!isStreaming || !hasLiveVideo) {
@@ -1242,21 +1599,21 @@ export function MonitoringPage() {
 
   // Handle face recognition overlays
   useEffect(() => {
+    const now = performance.now();
     const visibleFaceResults = recognitionResults.filter(
       (result) => result.face_box && result.status !== 'no_face',
     );
 
     if (visibleFaceResults.length === 0) {
-      // Remove face recognition overlay if no face or no result
-      setDetectionOverlays((current) =>
-        current.filter((overlay) => !overlay.id.startsWith('face-recognition'))
+      setOverlayTracks((current) =>
+        TrackManager.keepLiveTracks(current, now)
       );
       return;
     }
 
-    const now = performance.now();
-    const faceOverlays = visibleFaceResults.map((result, index) => ({
+    const faceOverlays: OverlayDetection[] = visibleFaceResults.map((result, index) => ({
       id: `face-recognition-${index}`,
+      backendTrackId: result.matched_face_id || result.matched_employee_id || null,
       label: getFaceOverlayLabel(result),
       confidence: result.score || undefined,
       borderColor: result.authorized ? '#10b981' : '#ef4444',
@@ -1267,18 +1624,10 @@ export function MonitoringPage() {
       y2: result.face_box!.y2,
       sourceWidth: result.face_box!.image_width,
       sourceHeight: result.face_box!.image_height,
-      targetX1: result.face_box!.x1,
-      targetY1: result.face_box!.y1,
-      targetX2: result.face_box!.x2,
-      targetY2: result.face_box!.y2,
-      lastSeenAt: now,
     }));
 
-    setDetectionOverlays((current) => {
-      // Remove any existing face recognition overlay
-      const withoutFace = current.filter((overlay) => !overlay.id.startsWith('face-recognition'));
-      // Add the new face recognition overlay
-      return [...withoutFace, ...faceOverlays];
+    setOverlayTracks((current) => {
+      return TrackManager.reconcileTracks(current, TrackManager.dedupeDetections(faceOverlays), now);
     });
   }, [recognitionResults]);
 
@@ -1360,14 +1709,16 @@ export function MonitoringPage() {
         safetyResult.fire.detections.length > 0 || !current ? safetyResult.fire : current
       );
 
-      const nextOverlays = dedupeIncomingDetectionOverlays([
+      const nextOverlays = TrackManager.dedupeDetections([
         ...renderablePpeItems.map((item, index) => {
           const palette = getOverlayPalette(item.class_name);
           const sourceWidth = safetyResult.ppe.image_width || frameWidth;
           const sourceHeight = safetyResult.ppe.image_height || frameHeight;
           const box = normalizeDetectionBox(item.bbox, sourceWidth, sourceHeight);
+          const backendTrackId = item.track_id ?? null;
           return {
-            id: `ppe-${index}-${item.class_name}`,
+            id: backendTrackId !== null ? `ppe-${backendTrackId}-${item.class_name}` : `ppe-${index}-${item.class_name}`,
+            backendTrackId,
             label: item.class_name,
             confidence: item.confidence,
             borderColor: palette.borderColor,
@@ -1385,8 +1736,10 @@ export function MonitoringPage() {
           .map((item, index) => {
             const palette = getOverlayPalette('Fall detected');
             const box = normalizeDetectionBox(item.bbox, frameWidth, frameHeight);
+            const backendTrackId = item.track_id ?? item.person_id ?? null;
             return {
-              id: `fall-${index}-${item.person_id}`,
+              id: backendTrackId !== null ? `fall-${backendTrackId}` : `fall-${index}-${item.person_id}`,
+              backendTrackId,
               label: 'Fall detected',
               confidence: item.confidence,
               borderColor: palette.borderColor,
@@ -1402,8 +1755,10 @@ export function MonitoringPage() {
         ...safetyResult.fire.detections.map((item, index) => {
           const palette = getOverlayPalette(item.class);
           const box = normalizeDetectionBox(item.bbox, frameWidth, frameHeight);
+          const backendTrackId = item.track_id ?? null;
           return {
-            id: `fire-${index}-${item.class}`,
+            id: backendTrackId !== null ? `fire-${backendTrackId}-${item.class}` : `fire-${index}-${item.class}`,
+            backendTrackId,
             label: item.class,
             confidence: item.confidence,
             borderColor: palette.borderColor,
@@ -1418,9 +1773,9 @@ export function MonitoringPage() {
         }),
       ]);
 
-      setDetectionOverlays((current) => {
-        const nextTracked = reconcileDetectionOverlays(current, nextOverlays, now);
-        return hasDetections ? nextTracked : [];
+      setOverlayTracks((current) => {
+        const nextTracked = TrackManager.reconcileTracks(current, nextOverlays, now);
+        return nextTracked;
       });
 
       if (Array.isArray(safetyResult.alerts) && safetyResult.alerts.length > 0) {
@@ -1806,7 +2161,7 @@ export function MonitoringPage() {
       setActiveSafetyModules(['ppe', 'fall', 'fire']);
       setHeadCount(null);
       setAlerts([]);
-      setDetectionOverlays([]);
+      setOverlayTracks([]);
       const nextSessionStartedAt = new Date().toISOString();
       setSessionStartedAt(nextSessionStartedAt);
       sessionStartedAtRef.current = nextSessionStartedAt;
@@ -2035,7 +2390,7 @@ export function MonitoringPage() {
     hasFaceBox &&
     (recognitionResult === null || recognitionResult.status === 'no_face') &&
     isRecognizing;
-  const hasRecognitionFaceOverlay = detectionOverlays.some((overlay) => overlay.id.startsWith('face-recognition'));
+  const hasRecognitionFaceOverlay = overlayTracks.some((overlay) => overlay.id.startsWith('face-recognition'));
   const localFaceBoxStyle =
     isStreaming && trackedFaceBox && !hasRecognitionFaceOverlay
       ? getLocalFaceBoxStyle(trackedFaceBox, videoRef.current)
@@ -2140,6 +2495,36 @@ export function MonitoringPage() {
     );
   };
 
+  if (!isAdminView && regulationSetupState.status !== 'ready') {
+    const adminText = regulationSetupState.adminName
+      ? `your admin ${regulationSetupState.adminName}`
+      : 'your admin';
+    const isCheckingRegulation = regulationSetupState.status === 'checking';
+
+    return (
+      <div className="min-h-screen flex flex-col bg-[#f5f3ed]">
+        <Navigation isAdmin={false} />
+
+        <div className="flex-1 py-12 px-6">
+          <div className="max-w-3xl mx-auto">
+            <div className="bg-white rounded-3xl shadow-xl p-8 border border-[#d4cbb7] text-center">
+              <h1 className="font-serif text-4xl text-[#4a3c2a] mb-4">
+                {isCheckingRegulation ? 'Checking monitoring setup...' : 'No regulation uploaded'}
+              </h1>
+              <p className="text-[#6b5d4f] text-lg leading-relaxed">
+                {isCheckingRegulation
+                  ? 'Please wait while Falcon Vision checks whether your company regulation is ready.'
+                  : `No regulation uploaded. ${adminText} should upload the company regulation first.`}
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <Footer />
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen flex flex-col bg-[#f5f3ed]">
       <Navigation isAdmin={isAdminView} />
@@ -2207,14 +2592,14 @@ export function MonitoringPage() {
                     </div>
                   )}
 
-                  {isStreaming && hasLiveVideo && detectionOverlays.map((overlay) => {
+                  {isStreaming && hasLiveVideo && overlayTracks.map((overlay) => {
                     const overlayStyle = getOverlayStyle(overlay, videoRef.current);
                     if (!overlayStyle) {
                       return null;
                     }
 
                     return (
-                      <div key={overlay.id} className="absolute inset-0 pointer-events-none">
+                      <div key={overlay.trackId} className="absolute inset-0 pointer-events-none">
                         <div
                           className="absolute rounded-sm border-[3px]"
                           style={{
@@ -2363,3 +2748,4 @@ export function MonitoringPage() {
     </div>
   );
 }
+

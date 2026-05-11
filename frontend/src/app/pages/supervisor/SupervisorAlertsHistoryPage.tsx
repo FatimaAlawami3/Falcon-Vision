@@ -225,9 +225,9 @@ export function SupervisorAlertsHistoryPage() {
 
           <div className="bg-white rounded-3xl shadow-xl p-6 border border-[#d4cbb7]">
             <h2 className="font-serif text-2xl text-[#4a3c2a] mb-6">Alert Records</h2>
-            <div className="overflow-auto max-h-[600px]">
+            <div className="max-h-[600px] overflow-x-auto overflow-y-scroll">
               <table className="w-full">
-                <thead className="border-b-2 border-[#d4cbb7]">
+                <thead className="sticky top-0 z-10 border-b-2 border-[#d4cbb7] bg-white">
                   <tr>
                     <th className="text-left py-3 px-4 text-[#6b5d4f]">Date</th>
                     <th className="text-left py-3 px-4 text-[#6b5d4f]">Time</th>

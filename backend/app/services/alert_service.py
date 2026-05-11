@@ -19,6 +19,8 @@ from app.utils.object_id import validate_object_id
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_ALERT_ZONE_NAME = "production"
+
 
 class AlertService:
     DUPLICATE_WINDOW_SECONDS = 10
@@ -53,6 +55,7 @@ class AlertService:
         image_bytes: bytes | None = None,
         bbox: list[float] | None = None,
         employee_name: str | None = None,
+        zone_name: str | None = DEFAULT_ALERT_ZONE_NAME,
         regulation_id: str | ObjectId | None = None,
     ) -> AlertResponse | None:
         organization_object_id = self._ensure_object_id(organization_id)
@@ -92,7 +95,7 @@ class AlertService:
             category=category,
             severity=severity,
             status=AlertStatus.OPEN,
-            snapshot=AlertSnapshot(employee_name=employee_name),
+            snapshot=AlertSnapshot(employee_name=employee_name, zone_name=zone_name or DEFAULT_ALERT_ZONE_NAME),
             evidence=AlertEvidence(frame_storage_path=evidence_path),
             detected_at=detected_at,
         )
@@ -166,7 +169,7 @@ class AlertService:
             status=str(alert_doc["status"]),
             detected_at=alert_doc["detected_at"],
             camera_name=(alert_doc.get("snapshot") or {}).get("camera_name"),
-            zone_name=(alert_doc.get("snapshot") or {}).get("zone_name"),
+            zone_name=(alert_doc.get("snapshot") or {}).get("zone_name") or DEFAULT_ALERT_ZONE_NAME,
             employee_name=(alert_doc.get("snapshot") or {}).get("employee_name"),
             evidence_image_path=self.storage_client.get_access_url(
                 (alert_doc.get("evidence") or {}).get("frame_storage_path")
