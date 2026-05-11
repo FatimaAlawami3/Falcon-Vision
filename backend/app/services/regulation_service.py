@@ -649,7 +649,7 @@ class RegulationService:
         """Convert extracted safety data to rule models.
 
         Args:
-            extracted_data: Dictionary with PPE_list, Fall_list, Heat_list
+            extracted_data: Dictionary with PPE_list, Fall_list, Heat_list, Access_list
             regulation_id: Regulation ID
             organization_id: Organization ID
 
@@ -773,6 +773,38 @@ class RegulationService:
                 },
                 "source": {
                     "text_excerpt": heat_reason,
+                },
+                "status": rule_status,
+            }
+            rule_model = ExtractedRuleModel(**rule_data)
+            saved_data = await self.rule_repository.insert_model(rule_model)
+            saved_rules.append(ExtractedRuleModel(**saved_data))
+
+        # Process Face Recognition / Access Control monitoring
+        access_data = extracted_data.get("Access_list", {})
+        if access_data.get("active") == "Yes":
+            access_reason = access_data.get("reason", "Face recognition access control requirement")
+            rule_data = {
+                "regulation_id": regulation_id,
+                "organization_id": organization_id,
+                "rule_code": f"FACE-{len(saved_rules) + 1:03d}",
+                "title": "Face Recognition Access Control",
+                "description": f"Face recognition access control required. Reason: {access_reason}.",
+                "category": RuleCategory.ACCESS_CONTROL,
+                "severity": Severity.MEDIUM,
+                "applies_to": {
+                    "zone_types": ["production", "warehouse", "maintenance", "entrance", "restricted"],
+                    "employee_roles": ["worker", "supervisor"],
+                    "camera_tags": ["face-recognition"],
+                },
+                "vision_mapping": {
+                    "module": VisionModule.FACE_ACCESS_CONTROL,
+                    "required_classes": [],
+                    "violation_when": "detected",
+                    "confidence_threshold": 0.5,
+                },
+                "source": {
+                    "text_excerpt": access_reason,
                 },
                 "status": rule_status,
             }

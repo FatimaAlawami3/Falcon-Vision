@@ -14,7 +14,7 @@ class ExtractionCancelledError(Exception):
 
 
 class SafetyRulesExtractor:
-    """Extracts safety rules (PPE, Fall, Heat) from documents using LLM."""
+    """Extracts safety rules (PPE, Fall, Heat, Access Control) from documents using LLM."""
 
     MIN_EXTRACTED_TEXT_CHARS = 200
     PPE_KEYWORDS = {
@@ -52,6 +52,19 @@ class SafetyRulesExtractor:
         "heat",
         "hot work",
         "spark",
+    ]
+    ACCESS_CONTROL_KEYWORDS = [
+        "face recognition",
+        "facial recognition",
+        "face access",
+        "access control",
+        "authorized employee",
+        "authorized employees",
+        "unauthorized access",
+        "unauthorized person",
+        "unauthorized persons",
+        "enrolled employee",
+        "enrolled employees",
     ]
 
     def __init__(self, HF_TOKEN: str | None = None):
@@ -188,6 +201,10 @@ class SafetyRulesExtractor:
             (keyword for keyword in self.FIRE_HEAT_KEYWORDS if self._contains_phrase(lowered_text, keyword)),
             None,
         )
+        access_match = next(
+            (keyword for keyword in self.ACCESS_CONTROL_KEYWORDS if self._contains_phrase(lowered_text, keyword)),
+            None,
+        )
 
         return {
             "PPE_list": self.normalize_ppe_items(ppe_items),
@@ -198,6 +215,10 @@ class SafetyRulesExtractor:
             "Heat_list": {
                 "active": "Yes" if fire_match else "No",
                 "reason": self._reason_for_keyword(text, fire_match) if fire_match else "",
+            },
+            "Access_list": {
+                "active": "Yes" if access_match else "No",
+                "reason": self._reason_for_keyword(text, access_match) if access_match else "",
             },
         }
 
@@ -213,12 +234,13 @@ class SafetyRulesExtractor:
             text: Text to analyze
 
         Returns:
-            Dictionary with PPE_list, Fall_list, Heat_list
+            Dictionary with PPE_list, Fall_list, Heat_list, Access_list
         """
         all_rules = {
             "PPE_list": set(),
             "Fall_list": {"active": "No", "reason": ""},
-            "Heat_list": {"active": "No", "reason": ""}
+            "Heat_list": {"active": "No", "reason": ""},
+            "Access_list": {"active": "No", "reason": ""},
         }
         fallback_rules = self.extract_locally_from_text(text)
 
@@ -238,8 +260,9 @@ class SafetyRulesExtractor:
     - Do NOT extract behavioral rules, colors, sizes, or descriptions.
     - Extract only mandatory equipment for employees.
 
-    TASK 2: Fall & Heat Monitoring
+    TASK 2: Fall, Heat, and Access Monitoring
     - If the text requires monitoring for falls/heights or fire/smoke/heat, set "active" to "Yes".
+    - If the text requires face recognition, facial recognition, authorized employee identification, or unauthorized access alerts, set Access_list "active" to "Yes".
     - Provide the direct quote from the document as the "reason".
 
     TEXT SEGMENT:
@@ -256,7 +279,8 @@ class SafetyRulesExtractor:
     {{
       "PPE_list": ["item1", "item2"],
       "Fall_list": {{"active": "Yes/No", "reason": "proof text"}},
-      "Heat_list": {{"active": "Yes/No", "reason": "proof text"}}
+      "Heat_list": {{"active": "Yes/No", "reason": "proof text"}},
+      "Access_list": {{"active": "Yes/No", "reason": "proof text"}}
     }}
     """
 
@@ -273,8 +297,8 @@ class SafetyRulesExtractor:
                 if "PPE_list" in data and isinstance(data["PPE_list"], list):
                     all_rules["PPE_list"].update(data["PPE_list"])
 
-                # Update Fall and Heat monitoring flags
-                for key in ["Fall_list", "Heat_list"]:
+                # Update Fall, Heat, and Access monitoring flags
+                for key in ["Fall_list", "Heat_list", "Access_list"]:
                     if key in data and str(data[key].get("active")).lower() == "yes":
                         all_rules[key]["active"] = "Yes"
                         all_rules[key]["reason"] = data[key].get("reason", "")
@@ -290,14 +314,15 @@ class SafetyRulesExtractor:
                 continue
 
         all_rules["PPE_list"].update(fallback_rules["PPE_list"])
-        for key in ["Fall_list", "Heat_list"]:
+        for key in ["Fall_list", "Heat_list", "Access_list"]:
             if all_rules[key]["active"] != "Yes" and fallback_rules[key]["active"] == "Yes":
                 all_rules[key] = fallback_rules[key]
 
         return {
             "PPE_list": self.normalize_ppe_items(list(all_rules["PPE_list"])),
             "Fall_list": all_rules["Fall_list"],
-            "Heat_list": all_rules["Heat_list"]
+            "Heat_list": all_rules["Heat_list"],
+            "Access_list": all_rules["Access_list"],
         }
 
     def extract_from_pdf(
