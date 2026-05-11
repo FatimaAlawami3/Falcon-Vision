@@ -52,6 +52,8 @@ class MultimodalFireResult:
 class FireSmokeDetector:
     """Fire/smoke detection with multimodal fusion of sensor and vision data."""
 
+    ALERT_CLASS_NAMES = {"fire", "smoke"}
+
     def __init__(
         self,
         yolo_model_path: str | Path,
@@ -94,13 +96,7 @@ class FireSmokeDetector:
         Returns:
             Tuple of (decision: none/smoke/fire, detections: list of FireDetection)
         """
-        results = self.yolo_model.track(
-            source=image,
-            persist=True,
-            tracker="bytetrack.yaml",
-            conf=self.conf_threshold,
-            verbose=False,
-        )
+        results = self.yolo_model.predict(image, conf=self.conf_threshold, verbose=False)
         result = results[0]
 
         detections = []
@@ -111,23 +107,19 @@ class FireSmokeDetector:
         if boxes is None or len(boxes) == 0:
             return "none", detections
 
-        track_ids = (
-            boxes.id.cpu().numpy().astype(int).tolist()
-            if getattr(boxes, "id", None) is not None
-            else []
-        )
-
-        for index, box in enumerate(boxes):
+        for box in boxes:
             cls_id = int(box.cls[0].item())
             conf = float(box.conf[0].item())
             bbox = box.xyxy[0].cpu().numpy()
             label = self.class_names.get(cls_id, str(cls_id))
 
+            if label not in self.ALERT_CLASS_NAMES:
+                continue
+
             detection = FireDetection(
                 class_name=label,
                 confidence=conf,
                 bbox=bbox.tolist(),
-                track_id=track_ids[index] if index < len(track_ids) else None,
             )
             detections.append(detection)
 
