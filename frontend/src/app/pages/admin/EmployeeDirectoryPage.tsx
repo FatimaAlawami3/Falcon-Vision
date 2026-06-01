@@ -37,6 +37,86 @@ const emptyEmployeeForm: EmployeeFormState = {
   email: '',
 };
 
+// Employee ID: exactly 5 digits.
+const ID_PATTERN = /^\d{5}$/;
+// Saudi mobile format: 05 followed by 8 digits (10 digits total).
+const PHONE_PATTERN = /^05\d{8}$/;
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// Letters (any language) and spaces only.
+const NAME_PATTERN = /^[\p{L} ]+$/u;
+
+type EmployeeFormErrors = Partial<Record<keyof EmployeeFormState, string>>;
+
+const VALIDATED_FIELDS = ['employee_number', 'full_name', 'department', 'job_title', 'phone', 'email'] as const;
+
+// Validate a single field. `treatEmptyAsError` controls whether a blank value
+// reports "required" (on submit) or is left without an error (while typing).
+function validateField(
+  field: keyof EmployeeFormState,
+  rawValue: string,
+  treatEmptyAsError: boolean,
+): string | undefined {
+  const value = rawValue.trim();
+
+  switch (field) {
+    case 'employee_number':
+      if (!value) return treatEmptyAsError ? 'Employee ID is required.' : undefined;
+      return ID_PATTERN.test(value) ? undefined : 'Employee ID must be exactly 5 digits.';
+    case 'full_name':
+      if (!value) return treatEmptyAsError ? 'Full name is required.' : undefined;
+      return NAME_PATTERN.test(value) ? undefined : 'Full name can only contain letters and spaces.';
+    case 'department':
+      if (!value) return treatEmptyAsError ? 'Department is required.' : undefined;
+      return undefined;
+    case 'job_title':
+      if (!value) return treatEmptyAsError ? 'Job title is required.' : undefined;
+      return undefined;
+    case 'phone':
+      if (!value) return treatEmptyAsError ? 'Phone number is required.' : undefined;
+      return PHONE_PATTERN.test(value)
+        ? undefined
+        : 'Phone must start with 05 and be 10 digits (e.g. 0512345678).';
+    case 'email':
+      if (!value) return treatEmptyAsError ? 'Email address is required.' : undefined;
+      return EMAIL_PATTERN.test(value) ? undefined : 'Enter a valid email (e.g. name@example.com).';
+    default:
+      return undefined;
+  }
+}
+
+// Live (per-keystroke) error: format is checked immediately, but a blank field
+// is not flagged as "required" until the user tries to save.
+function liveError(field: keyof EmployeeFormState, value: string): string | undefined {
+  return validateField(field, value, false);
+}
+
+function validateEmployeeForm(form: EmployeeFormState): EmployeeFormErrors {
+  const errors: EmployeeFormErrors = {};
+  for (const field of VALIDATED_FIELDS) {
+    const error = validateField(field, form[field], true);
+    if (error) {
+      errors[field] = error;
+    }
+  }
+  return errors;
+}
+
+// Shared input styling; switches to a red border when the field has an error.
+function inputClass(hasError: boolean): string {
+  return `w-full px-4 py-3 rounded-xl bg-[#f9f6f0] border focus:outline-none focus:ring-2 ${
+    hasError
+      ? 'border-red-500 focus:ring-red-500'
+      : 'border-[#d4cbb7] focus:ring-[#d87545]'
+  }`;
+}
+
+function FieldError({ message }: { message?: string }) {
+  if (!message) {
+    return null;
+  }
+  return <p className="mt-1 text-sm text-red-600">{message}</p>;
+}
+
 function toEmployeePayload(form: EmployeeFormState): EmployeeCreateRequest {
   return {
     employee_number: form.employee_number.trim(),
@@ -71,6 +151,8 @@ export function EmployeeDirectoryPage() {
   const [isSaving, setIsSaving] = useState(false);
   const [newEmployee, setNewEmployee] = useState<EmployeeFormState>(emptyEmployeeForm);
   const [editEmployee, setEditEmployee] = useState<EmployeeFormState>(emptyEmployeeForm);
+  const [newErrors, setNewErrors] = useState<EmployeeFormErrors>({});
+  const [editErrors, setEditErrors] = useState<EmployeeFormErrors>({});
   const [modalState, setModalState] = useState({ isOpen: false, title: '', message: '' });
   const [deleteConfirm, setDeleteConfirm] = useState<{ isOpen: boolean; employeeId: string | null; name: string }>({
     isOpen: false,
@@ -109,12 +191,9 @@ export function EmployeeDirectoryPage() {
       return;
     }
 
-    if (!newEmployee.employee_number.trim() || !newEmployee.full_name.trim()) {
-      setModalState({
-        isOpen: true,
-        title: 'Missing Information',
-        message: 'ID and full name are required.',
-      });
+    const errors = validateEmployeeForm(newEmployee);
+    setNewErrors(errors);
+    if (Object.keys(errors).length > 0) {
       return;
     }
 
@@ -123,6 +202,7 @@ export function EmployeeDirectoryPage() {
       const createdEmployee = await createEmployee(toEmployeePayload(newEmployee), token);
       setEmployees((currentEmployees) => [createdEmployee, ...currentEmployees]);
       setNewEmployee(emptyEmployeeForm);
+      setNewErrors({});
       setIsAdding(false);
       setModalState({
         isOpen: true,
@@ -146,12 +226,9 @@ export function EmployeeDirectoryPage() {
       return;
     }
 
-    if (!editEmployee.employee_number.trim() || !editEmployee.full_name.trim()) {
-      setModalState({
-        isOpen: true,
-        title: 'Missing Information',
-        message: 'ID and full name are required.',
-      });
+    const errors = validateEmployeeForm(editEmployee);
+    setEditErrors(errors);
+    if (Object.keys(errors).length > 0) {
       return;
     }
 
@@ -165,6 +242,7 @@ export function EmployeeDirectoryPage() {
       );
       setEditingId(null);
       setEditEmployee(emptyEmployeeForm);
+      setEditErrors({});
       setModalState({
         isOpen: true,
         title: 'Employee Updated',
@@ -256,34 +334,62 @@ export function EmployeeDirectoryPage() {
             <div className="bg-white rounded-3xl shadow-xl p-6 border border-[#d4cbb7] mb-8">
               <h2 className="font-serif text-2xl text-[#4a3c2a] mb-4">Create employee profile</h2>
               <div className="grid md:grid-cols-2 gap-4">
-                <input
-                  type="text"
-                  placeholder="ID"
-                  value={newEmployee.employee_number}
-                  onChange={(e) => setNewEmployee((current) => ({ ...current, employee_number: e.target.value }))}
-                  className="w-full px-4 py-3 rounded-xl bg-[#f9f6f0] border border-[#d4cbb7] focus:outline-none focus:ring-2 focus:ring-[#d87545]"
-                />
-                <input
-                  type="text"
-                  placeholder="Full name"
-                  value={newEmployee.full_name}
-                  onChange={(e) => setNewEmployee((current) => ({ ...current, full_name: e.target.value }))}
-                  className="w-full px-4 py-3 rounded-xl bg-[#f9f6f0] border border-[#d4cbb7] focus:outline-none focus:ring-2 focus:ring-[#d87545]"
-                />
-                <input
-                  type="text"
-                  placeholder="Department"
-                  value={newEmployee.department}
-                  onChange={(e) => setNewEmployee((current) => ({ ...current, department: e.target.value }))}
-                  className="w-full px-4 py-3 rounded-xl bg-[#f9f6f0] border border-[#d4cbb7] focus:outline-none focus:ring-2 focus:ring-[#d87545]"
-                />
-                <input
-                  type="text"
-                  placeholder="Job title"
-                  value={newEmployee.job_title}
-                  onChange={(e) => setNewEmployee((current) => ({ ...current, job_title: e.target.value }))}
-                  className="w-full px-4 py-3 rounded-xl bg-[#f9f6f0] border border-[#d4cbb7] focus:outline-none focus:ring-2 focus:ring-[#d87545]"
-                />
+                <div>
+                  <input
+                    type="text"
+                    placeholder="ID"
+                    value={newEmployee.employee_number}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setNewEmployee((current) => ({ ...current, employee_number: value }));
+                      setNewErrors((current) => ({ ...current, employee_number: liveError('employee_number', value) }));
+                    }}
+                    className={inputClass(Boolean(newErrors.employee_number))}
+                  />
+                  <FieldError message={newErrors.employee_number} />
+                </div>
+                <div>
+                  <input
+                    type="text"
+                    placeholder="Full name"
+                    value={newEmployee.full_name}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setNewEmployee((current) => ({ ...current, full_name: value }));
+                      setNewErrors((current) => ({ ...current, full_name: liveError('full_name', value) }));
+                    }}
+                    className={inputClass(Boolean(newErrors.full_name))}
+                  />
+                  <FieldError message={newErrors.full_name} />
+                </div>
+                <div>
+                  <input
+                    type="text"
+                    placeholder="Department"
+                    value={newEmployee.department}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setNewEmployee((current) => ({ ...current, department: value }));
+                      setNewErrors((current) => ({ ...current, department: liveError('department', value) }));
+                    }}
+                    className={inputClass(Boolean(newErrors.department))}
+                  />
+                  <FieldError message={newErrors.department} />
+                </div>
+                <div>
+                  <input
+                    type="text"
+                    placeholder="Job title"
+                    value={newEmployee.job_title}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setNewEmployee((current) => ({ ...current, job_title: value }));
+                      setNewErrors((current) => ({ ...current, job_title: liveError('job_title', value) }));
+                    }}
+                    className={inputClass(Boolean(newErrors.job_title))}
+                  />
+                  <FieldError message={newErrors.job_title} />
+                </div>
                 <select
                   value={newEmployee.employment_type}
                   onChange={(e) => setNewEmployee((current) => ({ ...current, employment_type: e.target.value }))}
@@ -302,20 +408,34 @@ export function EmployeeDirectoryPage() {
                   <option value="inactive">Inactive</option>
                   <option value="archived">Archived</option>
                 </select>
-                <input
-                  type="text"
-                  placeholder="Phone number"
-                  value={newEmployee.phone}
-                  onChange={(e) => setNewEmployee((current) => ({ ...current, phone: e.target.value }))}
-                  className="w-full px-4 py-3 rounded-xl bg-[#f9f6f0] border border-[#d4cbb7] focus:outline-none focus:ring-2 focus:ring-[#d87545]"
-                />
-                <input
-                  type="email"
-                  placeholder="Email address"
-                  value={newEmployee.email}
-                  onChange={(e) => setNewEmployee((current) => ({ ...current, email: e.target.value }))}
-                  className="w-full px-4 py-3 rounded-xl bg-[#f9f6f0] border border-[#d4cbb7] focus:outline-none focus:ring-2 focus:ring-[#d87545]"
-                />
+                <div>
+                  <input
+                    type="text"
+                    placeholder="Phone number (e.g. 0512345678)"
+                    value={newEmployee.phone}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setNewEmployee((current) => ({ ...current, phone: value }));
+                      setNewErrors((current) => ({ ...current, phone: liveError('phone', value) }));
+                    }}
+                    className={inputClass(Boolean(newErrors.phone))}
+                  />
+                  <FieldError message={newErrors.phone} />
+                </div>
+                <div>
+                  <input
+                    type="email"
+                    placeholder="Email address"
+                    value={newEmployee.email}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setNewEmployee((current) => ({ ...current, email: value }));
+                      setNewErrors((current) => ({ ...current, email: liveError('email', value) }));
+                    }}
+                    className={inputClass(Boolean(newErrors.email))}
+                  />
+                  <FieldError message={newErrors.email} />
+                </div>
                 </div>
 
               <div className="flex gap-4 pt-5">
@@ -330,6 +450,7 @@ export function EmployeeDirectoryPage() {
                   onClick={() => {
                     setIsAdding(false);
                     setNewEmployee(emptyEmployeeForm);
+                    setNewErrors({});
                   }}
                   className="px-8 py-3 bg-[#8b7355] text-white rounded-full shadow-md hover:bg-[#6b5d4f] transition-colors"
                 >
@@ -365,34 +486,62 @@ export function EmployeeDirectoryPage() {
                         <td className="py-4 px-4 text-[#4a3c2a]">
                           {isEditing ? (
                             <div className="space-y-2">
-                              <input
-                                type="text"
-                                value={editEmployee.employee_number}
-                                onChange={(e) => setEditEmployee((current) => ({ ...current, employee_number: e.target.value }))}
-                                placeholder="ID"
-                                className="w-full px-4 py-3 rounded-xl bg-[#f9f6f0] border border-[#d4cbb7] focus:outline-none focus:ring-2 focus:ring-[#d87545]"
-                              />
-                              <input
-                                type="text"
-                                value={editEmployee.full_name}
-                                onChange={(e) => setEditEmployee((current) => ({ ...current, full_name: e.target.value }))}
-                                placeholder="Full name"
-                                className="w-full px-4 py-3 rounded-xl bg-[#f9f6f0] border border-[#d4cbb7] focus:outline-none focus:ring-2 focus:ring-[#d87545]"
-                              />
-                              <input
-                                type="email"
-                                value={editEmployee.email}
-                                onChange={(e) => setEditEmployee((current) => ({ ...current, email: e.target.value }))}
-                                placeholder="Email"
-                                className="w-full px-4 py-3 rounded-xl bg-[#f9f6f0] border border-[#d4cbb7] focus:outline-none focus:ring-2 focus:ring-[#d87545]"
-                              />
-                              <input
-                                type="text"
-                                value={editEmployee.phone}
-                                onChange={(e) => setEditEmployee((current) => ({ ...current, phone: e.target.value }))}
-                                placeholder="Phone"
-                                className="w-full px-4 py-3 rounded-xl bg-[#f9f6f0] border border-[#d4cbb7] focus:outline-none focus:ring-2 focus:ring-[#d87545]"
-                              />
+                              <div>
+                                <input
+                                  type="text"
+                                  value={editEmployee.employee_number}
+                                  onChange={(e) => {
+                                    const value = e.target.value;
+                                    setEditEmployee((current) => ({ ...current, employee_number: value }));
+                                    setEditErrors((current) => ({ ...current, employee_number: liveError('employee_number', value) }));
+                                  }}
+                                  placeholder="ID"
+                                  className={inputClass(Boolean(editErrors.employee_number))}
+                                />
+                                <FieldError message={editErrors.employee_number} />
+                              </div>
+                              <div>
+                                <input
+                                  type="text"
+                                  value={editEmployee.full_name}
+                                  onChange={(e) => {
+                                    const value = e.target.value;
+                                    setEditEmployee((current) => ({ ...current, full_name: value }));
+                                    setEditErrors((current) => ({ ...current, full_name: liveError('full_name', value) }));
+                                  }}
+                                  placeholder="Full name"
+                                  className={inputClass(Boolean(editErrors.full_name))}
+                                />
+                                <FieldError message={editErrors.full_name} />
+                              </div>
+                              <div>
+                                <input
+                                  type="email"
+                                  value={editEmployee.email}
+                                  onChange={(e) => {
+                                    const value = e.target.value;
+                                    setEditEmployee((current) => ({ ...current, email: value }));
+                                    setEditErrors((current) => ({ ...current, email: liveError('email', value) }));
+                                  }}
+                                  placeholder="Email"
+                                  className={inputClass(Boolean(editErrors.email))}
+                                />
+                                <FieldError message={editErrors.email} />
+                              </div>
+                              <div>
+                                <input
+                                  type="text"
+                                  value={editEmployee.phone}
+                                  onChange={(e) => {
+                                    const value = e.target.value;
+                                    setEditEmployee((current) => ({ ...current, phone: value }));
+                                    setEditErrors((current) => ({ ...current, phone: liveError('phone', value) }));
+                                  }}
+                                  placeholder="Phone"
+                                  className={inputClass(Boolean(editErrors.phone))}
+                                />
+                                <FieldError message={editErrors.phone} />
+                              </div>
                             </div>
                           ) : (
                             <div>
@@ -405,20 +554,34 @@ export function EmployeeDirectoryPage() {
                         <td className="py-4 px-4 text-[#6b5d4f]">
                           {isEditing ? (
                             <div className="space-y-2">
-                              <input
-                                type="text"
-                                value={editEmployee.department}
-                                onChange={(e) => setEditEmployee((current) => ({ ...current, department: e.target.value }))}
-                                placeholder="Department"
-                                className="w-full px-4 py-3 rounded-xl bg-[#f9f6f0] border border-[#d4cbb7] focus:outline-none focus:ring-2 focus:ring-[#d87545]"
-                              />
-                              <input
-                                type="text"
-                                value={editEmployee.job_title}
-                                onChange={(e) => setEditEmployee((current) => ({ ...current, job_title: e.target.value }))}
-                                placeholder="Job title"
-                                className="w-full px-4 py-3 rounded-xl bg-[#f9f6f0] border border-[#d4cbb7] focus:outline-none focus:ring-2 focus:ring-[#d87545]"
-                              />
+                              <div>
+                                <input
+                                  type="text"
+                                  value={editEmployee.department}
+                                  onChange={(e) => {
+                                    const value = e.target.value;
+                                    setEditEmployee((current) => ({ ...current, department: value }));
+                                    setEditErrors((current) => ({ ...current, department: liveError('department', value) }));
+                                  }}
+                                  placeholder="Department"
+                                  className={inputClass(Boolean(editErrors.department))}
+                                />
+                                <FieldError message={editErrors.department} />
+                              </div>
+                              <div>
+                                <input
+                                  type="text"
+                                  value={editEmployee.job_title}
+                                  onChange={(e) => {
+                                    const value = e.target.value;
+                                    setEditEmployee((current) => ({ ...current, job_title: value }));
+                                    setEditErrors((current) => ({ ...current, job_title: liveError('job_title', value) }));
+                                  }}
+                                  placeholder="Job title"
+                                  className={inputClass(Boolean(editErrors.job_title))}
+                                />
+                                <FieldError message={editErrors.job_title} />
+                              </div>
                             </div>
                           ) : (
                             <div>
@@ -479,6 +642,7 @@ export function EmployeeDirectoryPage() {
                                 onClick={() => {
                                   setEditingId(null);
                                   setEditEmployee(emptyEmployeeForm);
+                                  setEditErrors({});
                                 }}
                                 className="px-4 py-2 bg-[#8b7355] text-white rounded-full shadow-md hover:bg-[#6b5d4f] transition-colors"
                               >
@@ -491,6 +655,7 @@ export function EmployeeDirectoryPage() {
                                 onClick={() => {
                                   setEditingId(employee.id);
                                   setEditEmployee(buildFormFromEmployee(employee));
+                                  setEditErrors({});
                                 }}
                                 className="px-4 py-2 bg-[#d87545] text-white rounded-full shadow-md hover:bg-[#c42c1f] transition-colors"
                               >

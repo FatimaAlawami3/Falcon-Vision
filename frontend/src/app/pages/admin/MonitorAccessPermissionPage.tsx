@@ -36,6 +36,90 @@ const emptySupervisorForm: SupervisorFormState = {
   status: 'active',
 };
 
+// Supervisor ID: exactly 5 digits (matches the linked employee ID).
+const ID_PATTERN = /^\d{5}$/;
+// Saudi mobile format: 05 followed by 8 digits (10 digits total).
+const PHONE_PATTERN = /^05\d{8}$/;
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// Letters (any language) and spaces only.
+const NAME_PATTERN = /^[\p{L} ]+$/u;
+const MIN_PASSWORD_LENGTH = 8;
+
+type SupervisorFormErrors = Partial<Record<keyof SupervisorFormState, string>>;
+
+const VALIDATED_FIELDS = ['employee_id', 'full_name', 'email', 'job_title', 'phone', 'password'] as const;
+
+// Validate a single field. `treatEmptyAsError` reports "required" on submit but
+// stays quiet while typing; `passwordRequired` is false when editing (the
+// password field is an optional reset there).
+function validateField(
+  field: keyof SupervisorFormState,
+  rawValue: string,
+  treatEmptyAsError: boolean,
+  passwordRequired: boolean,
+): string | undefined {
+  const value = rawValue.trim();
+
+  switch (field) {
+    case 'employee_id':
+      if (!value) return treatEmptyAsError ? 'Supervisor ID is required.' : undefined;
+      return ID_PATTERN.test(value) ? undefined : 'Supervisor ID must be exactly 5 digits.';
+    case 'full_name':
+      if (!value) return treatEmptyAsError ? 'Full name is required.' : undefined;
+      return NAME_PATTERN.test(value) ? undefined : 'Full name can only contain letters and spaces.';
+    case 'email':
+      if (!value) return treatEmptyAsError ? 'Email address is required.' : undefined;
+      return EMAIL_PATTERN.test(value) ? undefined : 'Enter a valid email (e.g. name@example.com).';
+    case 'job_title':
+      if (!value) return treatEmptyAsError ? 'Job title is required.' : undefined;
+      return undefined;
+    case 'phone':
+      if (!value) return treatEmptyAsError ? 'Phone number is required.' : undefined;
+      return PHONE_PATTERN.test(value)
+        ? undefined
+        : 'Phone must start with 05 and be 10 digits (e.g. 0512345678).';
+    case 'password':
+      if (!value) return treatEmptyAsError && passwordRequired ? 'A temporary password is required.' : undefined;
+      return value.length >= MIN_PASSWORD_LENGTH
+        ? undefined
+        : `Password must be at least ${MIN_PASSWORD_LENGTH} characters.`;
+    default:
+      return undefined;
+  }
+}
+
+// Live (per-keystroke) error: format is checked immediately, but a blank field
+// is not flagged as "required" until the user tries to save.
+function liveError(field: keyof SupervisorFormState, value: string): string | undefined {
+  return validateField(field, value, false, false);
+}
+
+function validateSupervisorForm(form: SupervisorFormState, passwordRequired: boolean): SupervisorFormErrors {
+  const errors: SupervisorFormErrors = {};
+  for (const field of VALIDATED_FIELDS) {
+    const error = validateField(field, form[field], true, passwordRequired);
+    if (error) {
+      errors[field] = error;
+    }
+  }
+  return errors;
+}
+
+// Shared input styling; switches to a red border when the field has an error.
+function inputClass(hasError: boolean, base: 'cream' | 'white' = 'cream'): string {
+  const bg = base === 'white' ? 'bg-white' : 'bg-[#f9f6f0]';
+  return `w-full px-4 py-3 rounded-xl ${bg} border focus:outline-none focus:ring-2 ${
+    hasError ? 'border-red-500 focus:ring-red-500' : 'border-[#d4cbb7] focus:ring-[#d87545]'
+  }`;
+}
+
+function FieldError({ message }: { message?: string }) {
+  if (!message) {
+    return null;
+  }
+  return <p className="mt-1 text-sm text-red-600">{message}</p>;
+}
+
 function formatLastLogin(lastLoginAt?: string | null) {
   if (!lastLoginAt) {
     return 'Never signed in';
@@ -56,6 +140,8 @@ export function MonitorAccessPermissionPage() {
   const [isSaving, setIsSaving] = useState(false);
   const [newSupervisor, setNewSupervisor] = useState<SupervisorFormState>(emptySupervisorForm);
   const [editSupervisor, setEditSupervisor] = useState<SupervisorFormState>(emptySupervisorForm);
+  const [newErrors, setNewErrors] = useState<SupervisorFormErrors>({});
+  const [editErrors, setEditErrors] = useState<SupervisorFormErrors>({});
   const [modalState, setModalState] = useState({ isOpen: false, title: '', message: '' });
   const [deleteConfirm, setDeleteConfirm] = useState<{ isOpen: boolean; supervisorId: string | null; name: string }>({
     isOpen: false,
@@ -93,11 +179,13 @@ export function MonitorAccessPermissionPage() {
 
   const resetAddForm = () => {
     setNewSupervisor(emptySupervisorForm);
+    setNewErrors({});
     setIsAdding(false);
   };
 
   const handleEdit = (supervisor: UserResponse) => {
     setEditingId(supervisor.id);
+    setEditErrors({});
     setEditSupervisor({
       employee_id: supervisor.employee_id ?? '',
       full_name: supervisor.full_name,
@@ -115,17 +203,9 @@ export function MonitorAccessPermissionPage() {
       return;
     }
 
-    if (
-      !newSupervisor.employee_id.trim()
-      || !newSupervisor.full_name.trim()
-      || !newSupervisor.email.trim()
-      || !newSupervisor.password.trim()
-    ) {
-      setModalState({
-        isOpen: true,
-        title: 'Missing Information',
-        message: 'Supervisor ID, name, email, and a temporary password are required.',
-      });
+    const errors = validateSupervisorForm(newSupervisor, true);
+    setNewErrors(errors);
+    if (Object.keys(errors).length > 0) {
       return;
     }
 
@@ -173,12 +253,9 @@ export function MonitorAccessPermissionPage() {
       return;
     }
 
-    if (!editSupervisor.employee_id.trim() || !editSupervisor.full_name.trim() || !editSupervisor.email.trim()) {
-      setModalState({
-        isOpen: true,
-        title: 'Missing Information',
-        message: 'Supervisor ID, name, and email are required.',
-      });
+    const errors = validateSupervisorForm(editSupervisor, false);
+    setEditErrors(errors);
+    if (Object.keys(errors).length > 0) {
       return;
     }
 
@@ -207,6 +284,7 @@ export function MonitorAccessPermissionPage() {
       );
       setEditingId(null);
       setEditSupervisor(emptySupervisorForm);
+      setEditErrors({});
       setModalState({
         isOpen: true,
         title: 'Supervisor Updated',
@@ -296,48 +374,90 @@ export function MonitorAccessPermissionPage() {
               <div className="bg-white rounded-2xl p-5 mb-6 border border-[#e7cdb8]">
                 <h3 className="font-serif text-2xl text-[#4a3c2a] mb-4">Create supervisor account</h3>
                 <div className="grid md:grid-cols-2 gap-4">
-                  <input
-                    type="text"
-                    placeholder="ID"
-                    value={newSupervisor.employee_id}
-                    onChange={(e) => setNewSupervisor((current) => ({ ...current, employee_id: e.target.value }))}
-                    className="w-full px-4 py-3 rounded-xl bg-[#f9f6f0] border border-[#d4cbb7] focus:outline-none focus:ring-2 focus:ring-[#d87545]"
-                  />
-                  <input
-                    type="text"
-                    placeholder="Full name"
-                    value={newSupervisor.full_name}
-                    onChange={(e) => setNewSupervisor((current) => ({ ...current, full_name: e.target.value }))}
-                    className="w-full px-4 py-3 rounded-xl bg-[#f9f6f0] border border-[#d4cbb7] focus:outline-none focus:ring-2 focus:ring-[#d87545]"
-                  />
-                  <input
-                    type="email"
-                    placeholder="Email address"
-                    value={newSupervisor.email}
-                    onChange={(e) => setNewSupervisor((current) => ({ ...current, email: e.target.value }))}
-                    className="w-full px-4 py-3 rounded-xl bg-[#f9f6f0] border border-[#d4cbb7] focus:outline-none focus:ring-2 focus:ring-[#d87545]"
-                  />
-                  <input
-                    type="text"
-                    placeholder="Job title"
-                    value={newSupervisor.job_title}
-                    onChange={(e) => setNewSupervisor((current) => ({ ...current, job_title: e.target.value }))}
-                    className="w-full px-4 py-3 rounded-xl bg-[#f9f6f0] border border-[#d4cbb7] focus:outline-none focus:ring-2 focus:ring-[#d87545]"
-                  />
-                  <input
-                    type="text"
-                    placeholder="Phone number"
-                    value={newSupervisor.phone}
-                    onChange={(e) => setNewSupervisor((current) => ({ ...current, phone: e.target.value }))}
-                    className="w-full px-4 py-3 rounded-xl bg-[#f9f6f0] border border-[#d4cbb7] focus:outline-none focus:ring-2 focus:ring-[#d87545]"
-                  />
-                  <input
-                    type="password"
-                    placeholder="Temporary password"
-                    value={newSupervisor.password}
-                    onChange={(e) => setNewSupervisor((current) => ({ ...current, password: e.target.value }))}
-                    className="w-full px-4 py-3 rounded-xl bg-[#f9f6f0] border border-[#d4cbb7] focus:outline-none focus:ring-2 focus:ring-[#d87545]"
-                  />
+                  <div>
+                    <input
+                      type="text"
+                      placeholder="ID"
+                      value={newSupervisor.employee_id}
+                      onChange={(e) => {
+                        const value = e.target.value;
+                        setNewSupervisor((current) => ({ ...current, employee_id: value }));
+                        setNewErrors((current) => ({ ...current, employee_id: liveError('employee_id', value) }));
+                      }}
+                      className={inputClass(Boolean(newErrors.employee_id))}
+                    />
+                    <FieldError message={newErrors.employee_id} />
+                  </div>
+                  <div>
+                    <input
+                      type="text"
+                      placeholder="Full name"
+                      value={newSupervisor.full_name}
+                      onChange={(e) => {
+                        const value = e.target.value;
+                        setNewSupervisor((current) => ({ ...current, full_name: value }));
+                        setNewErrors((current) => ({ ...current, full_name: liveError('full_name', value) }));
+                      }}
+                      className={inputClass(Boolean(newErrors.full_name))}
+                    />
+                    <FieldError message={newErrors.full_name} />
+                  </div>
+                  <div>
+                    <input
+                      type="email"
+                      placeholder="Email address"
+                      value={newSupervisor.email}
+                      onChange={(e) => {
+                        const value = e.target.value;
+                        setNewSupervisor((current) => ({ ...current, email: value }));
+                        setNewErrors((current) => ({ ...current, email: liveError('email', value) }));
+                      }}
+                      className={inputClass(Boolean(newErrors.email))}
+                    />
+                    <FieldError message={newErrors.email} />
+                  </div>
+                  <div>
+                    <input
+                      type="text"
+                      placeholder="Job title"
+                      value={newSupervisor.job_title}
+                      onChange={(e) => {
+                        const value = e.target.value;
+                        setNewSupervisor((current) => ({ ...current, job_title: value }));
+                        setNewErrors((current) => ({ ...current, job_title: liveError('job_title', value) }));
+                      }}
+                      className={inputClass(Boolean(newErrors.job_title))}
+                    />
+                    <FieldError message={newErrors.job_title} />
+                  </div>
+                  <div>
+                    <input
+                      type="text"
+                      placeholder="Phone number (e.g. 0512345678)"
+                      value={newSupervisor.phone}
+                      onChange={(e) => {
+                        const value = e.target.value;
+                        setNewSupervisor((current) => ({ ...current, phone: value }));
+                        setNewErrors((current) => ({ ...current, phone: liveError('phone', value) }));
+                      }}
+                      className={inputClass(Boolean(newErrors.phone))}
+                    />
+                    <FieldError message={newErrors.phone} />
+                  </div>
+                  <div>
+                    <input
+                      type="password"
+                      placeholder="Temporary password"
+                      value={newSupervisor.password}
+                      onChange={(e) => {
+                        const value = e.target.value;
+                        setNewSupervisor((current) => ({ ...current, password: value }));
+                        setNewErrors((current) => ({ ...current, password: liveError('password', value) }));
+                      }}
+                      className={inputClass(Boolean(newErrors.password))}
+                    />
+                    <FieldError message={newErrors.password} />
+                  </div>
                   <select
                     value={newSupervisor.status}
                     onChange={(e) => setNewSupervisor((current) => ({ ...current, status: e.target.value }))}
@@ -394,19 +514,33 @@ export function MonitorAccessPermissionPage() {
                           <td className="py-4 text-[#8b4a32]">
                             {isEditing ? (
                               <div className="space-y-2">
-                                <input
-                                  type="text"
-                                  value={editSupervisor.employee_id}
-                                  onChange={(e) => setEditSupervisor((current) => ({ ...current, employee_id: e.target.value }))}
-                                  placeholder="ID"
-                                  className="w-full px-4 py-3 rounded-xl bg-white border border-[#d4cbb7] focus:outline-none focus:ring-2 focus:ring-[#d87545]"
-                                />
-                                <input
-                                  type="text"
-                                  value={editSupervisor.full_name}
-                                  onChange={(e) => setEditSupervisor((current) => ({ ...current, full_name: e.target.value }))}
-                                  className="w-full px-4 py-3 rounded-xl bg-white border border-[#d4cbb7] focus:outline-none focus:ring-2 focus:ring-[#d87545]"
-                                />
+                                <div>
+                                  <input
+                                    type="text"
+                                    value={editSupervisor.employee_id}
+                                    onChange={(e) => {
+                                      const value = e.target.value;
+                                      setEditSupervisor((current) => ({ ...current, employee_id: value }));
+                                      setEditErrors((current) => ({ ...current, employee_id: liveError('employee_id', value) }));
+                                    }}
+                                    placeholder="ID"
+                                    className={inputClass(Boolean(editErrors.employee_id), 'white')}
+                                  />
+                                  <FieldError message={editErrors.employee_id} />
+                                </div>
+                                <div>
+                                  <input
+                                    type="text"
+                                    value={editSupervisor.full_name}
+                                    onChange={(e) => {
+                                      const value = e.target.value;
+                                      setEditSupervisor((current) => ({ ...current, full_name: value }));
+                                      setEditErrors((current) => ({ ...current, full_name: liveError('full_name', value) }));
+                                    }}
+                                    className={inputClass(Boolean(editErrors.full_name), 'white')}
+                                  />
+                                  <FieldError message={editErrors.full_name} />
+                                </div>
                               </div>
                             ) : (
                               <div>
@@ -417,12 +551,19 @@ export function MonitorAccessPermissionPage() {
                           </td>
                           <td className="py-4 text-[#8b4a32]">
                             {isEditing ? (
-                              <input
-                                type="email"
-                                value={editSupervisor.email}
-                                onChange={(e) => setEditSupervisor((current) => ({ ...current, email: e.target.value }))}
-                                className="w-full px-4 py-3 rounded-xl bg-white border border-[#d4cbb7] focus:outline-none focus:ring-2 focus:ring-[#d87545]"
-                              />
+                              <div>
+                                <input
+                                  type="email"
+                                  value={editSupervisor.email}
+                                  onChange={(e) => {
+                                    const value = e.target.value;
+                                    setEditSupervisor((current) => ({ ...current, email: value }));
+                                    setEditErrors((current) => ({ ...current, email: liveError('email', value) }));
+                                  }}
+                                  className={inputClass(Boolean(editErrors.email), 'white')}
+                                />
+                                <FieldError message={editErrors.email} />
+                              </div>
                             ) : (
                               supervisor.email
                             )}
@@ -430,27 +571,48 @@ export function MonitorAccessPermissionPage() {
                           <td className="py-4 text-[#8b4a32]">
                             {isEditing ? (
                               <div className="space-y-2">
-                                <input
-                                  type="text"
-                                  value={editSupervisor.job_title}
-                                  onChange={(e) => setEditSupervisor((current) => ({ ...current, job_title: e.target.value }))}
-                                  placeholder="Job title"
-                                  className="w-full px-4 py-3 rounded-xl bg-white border border-[#d4cbb7] focus:outline-none focus:ring-2 focus:ring-[#d87545]"
-                                />
-                                <input
-                                  type="text"
-                                  value={editSupervisor.phone}
-                                  onChange={(e) => setEditSupervisor((current) => ({ ...current, phone: e.target.value }))}
-                                  placeholder="Phone"
-                                  className="w-full px-4 py-3 rounded-xl bg-white border border-[#d4cbb7] focus:outline-none focus:ring-2 focus:ring-[#d87545]"
-                                />
-                                <input
-                                  type="password"
-                                  value={editSupervisor.password}
-                                  onChange={(e) => setEditSupervisor((current) => ({ ...current, password: e.target.value }))}
-                                  placeholder="Reset password (optional)"
-                                  className="w-full px-4 py-3 rounded-xl bg-white border border-[#d4cbb7] focus:outline-none focus:ring-2 focus:ring-[#d87545]"
-                                />
+                                <div>
+                                  <input
+                                    type="text"
+                                    value={editSupervisor.job_title}
+                                    onChange={(e) => {
+                                      const value = e.target.value;
+                                      setEditSupervisor((current) => ({ ...current, job_title: value }));
+                                      setEditErrors((current) => ({ ...current, job_title: liveError('job_title', value) }));
+                                    }}
+                                    placeholder="Job title"
+                                    className={inputClass(Boolean(editErrors.job_title), 'white')}
+                                  />
+                                  <FieldError message={editErrors.job_title} />
+                                </div>
+                                <div>
+                                  <input
+                                    type="text"
+                                    value={editSupervisor.phone}
+                                    onChange={(e) => {
+                                      const value = e.target.value;
+                                      setEditSupervisor((current) => ({ ...current, phone: value }));
+                                      setEditErrors((current) => ({ ...current, phone: liveError('phone', value) }));
+                                    }}
+                                    placeholder="Phone"
+                                    className={inputClass(Boolean(editErrors.phone), 'white')}
+                                  />
+                                  <FieldError message={editErrors.phone} />
+                                </div>
+                                <div>
+                                  <input
+                                    type="password"
+                                    value={editSupervisor.password}
+                                    onChange={(e) => {
+                                      const value = e.target.value;
+                                      setEditSupervisor((current) => ({ ...current, password: value }));
+                                      setEditErrors((current) => ({ ...current, password: liveError('password', value) }));
+                                    }}
+                                    placeholder="Reset password (optional)"
+                                    className={inputClass(Boolean(editErrors.password), 'white')}
+                                  />
+                                  <FieldError message={editErrors.password} />
+                                </div>
                               </div>
                             ) : (
                               <div>
@@ -497,6 +659,7 @@ export function MonitorAccessPermissionPage() {
                                   onClick={() => {
                                     setEditingId(null);
                                     setEditSupervisor(emptySupervisorForm);
+                                    setEditErrors({});
                                   }}
                                   className="px-4 py-2 bg-[#8b7355] text-white rounded-full shadow-md hover:bg-[#6b5d4f] transition-colors"
                                 >

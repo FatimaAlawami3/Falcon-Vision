@@ -17,7 +17,6 @@ class PPEDetection:
     bbox: List[float]  # [x1, y1, x2, y2]
     image_width: int
     image_height: int
-    track_id: int | None = None
 
 
 @dataclass
@@ -50,40 +49,6 @@ class PPEDetector:
         "Safety Vest": "No Safety Vest",
     }
 
-    NORMALIZED_CLASS_MAP = {
-        "coverall": "Coverall",
-        "protective clothing": "Coverall",
-        "protective suit": "Coverall",
-        "protective wears": "Coverall",
-        "body protection": "Coverall",
-        "ear protector": "Ear Protectors",
-        "ear protectors": "Ear Protectors",
-        "ear muffs": "Ear Protectors",
-        "ear plugs": "Ear Protectors",
-        "face shield": "Face Shield",
-        "face shields": "Face Shield",
-        "glove": "Gloves",
-        "gloves": "Gloves",
-        "protective gloves": "Gloves",
-        "helmet": "Helmet",
-        "hard hat": "Helmet",
-        "Safety helmet": "Helmet",
-        "mask": "Mask",
-        "breathing apparatus": "Mask",
-        "respiratory protection": "Mask",
-        "safety glasses": "Safety Glasses",
-        "goggles": "Safety Glasses",
-        "safety harness": "Safety Harness",
-        "harness": "Safety Harness",
-        "safety shoes": "Safety Shoes",
-        "boots": "Safety Shoes",
-        "safety vest": "Safety Vest",
-        "vest": "Safety Vest",
-        "high visibility vest": "Safety Vest",
-        "hi vis vest": "Safety Vest",
-        "reflective vest": "Safety Vest"
-    }
-
     def __init__(self, model_path: str | Path, use_clip: bool = True):
         """Initialize the PPE detector with a YOLO model.
 
@@ -94,49 +59,50 @@ class PPEDetector:
         self.model = YOLO(str(model_path))
         self.model_path = Path(model_path)
         self.use_clip = use_clip
+        self.clip_client: CLIPMappingClient | None = None
+
+        self.positive_ppe_classes = list(self.POSITIVE_TO_NEGATIVE_CLASS.keys())
+        # Resolved text-term -> canonical class, cached so each term hits CLIP once.
+        self._mapping_cache: dict[str, str | None] = {}
 
         if use_clip:
+            # Degrade gracefully to fuzzy matching on any failure (missing
+            # package, failed weight download, CUDA error) rather than leaving
+            # use_clip=True with a broken client.
             try:
                 self.clip_client = CLIPMappingClient()
-            except ImportError:
-                print("CLIP not available, falling back to simple text matching")
+                # Pre-compute the positive-class embeddings once so the first
+                # real mapping call doesn't pay the encoding cost.
+                self.clip_client.encode_image_classes(self.positive_ppe_classes)
+            except Exception as exc:
+                print(f"CLIP unavailable ({exc}); falling back to fuzzy text matching")
                 self.use_clip = False
-        else:
-            self.clip_client = None
-
-        # PPE classes that the model detect
-        self.ppe_classes = ['Coverall', 'Ear Protectors', 
-            'Face Shield', 'Gloves', 'Helmet', 'Mask', 'No Coverall',
-            'No Ear Protectors', 'No Face Shield', 'No Gloves',
-            'No Helmet', 'No Mask', 'No Safety Glasses', 
-            'No Safety Harness', 'No Safety Shoes', 'No Safety Vest', 
-            'Safety Glasses', 'Safety Harness', 'Safety Shoes', 'Safety Vest']
-        self.positive_ppe_classes = list(self.POSITIVE_TO_NEGATIVE_CLASS.keys())
+                self.clip_client = None
 
 
     def detect_ppe(
         self,
         image: np.ndarray,
-        confidence_threshold: float = 0.4,
-        image_size: int = 416,
+        confidence_threshold: float = 0.35,
+        image_size: int | None = None,
     ) -> List[PPEDetection]:
         """Detect PPE items in an image.
 
         Args:
             image: Input image as numpy array (BGR format)
             confidence_threshold: Minimum confidence for detections
+            image_size: YOLO inference size; when None, auto-matched to the frame
+                width (multiple of 32) to avoid upscaling a downscaled frame.
 
         Returns:
             List of detected PPE items
         """
         height, width = image.shape[:2]
+        inference_size = image_size or max(160, min(640, round(width / 32) * 32))
 
-        # Run persistent object tracking so the same object keeps a stable ID across frames.
-        results = self.model.track(
+        results = self.model.predict(
             source=image,
-            persist=True,
-            tracker="bytetrack.yaml",
-            imgsz=image_size,
+            imgsz=inference_size,
             conf=confidence_threshold,
             verbose=False,
         )
@@ -144,13 +110,7 @@ class PPEDetector:
         detections = []
         for result in results:
             if result.boxes is not None:
-                track_ids = (
-                    result.boxes.id.cpu().numpy().astype(int).tolist()
-                    if getattr(result.boxes, "id", None) is not None
-                    else []
-                )
-
-                for index, box in enumerate(result.boxes):
+                for box in result.boxes:
                     # Get bounding box coordinates
                     bbox = box.xyxy[0].cpu().numpy()  # [x1, y1, x2, y2]
 
@@ -171,11 +131,73 @@ class PPEDetector:
                         bbox=bbox.tolist(),
                         image_width=width,
                         image_height=height,
-                        track_id=track_ids[index] if index < len(track_ids) else None,
                     )
                     detections.append(detection)
 
-        return detections
+        return self._suppress_duplicate_detections(detections)
+
+    @staticmethod
+    def _bbox_overlap(a: List[float], b: List[float]) -> float:
+        """Intersection over the SMALLER box's area.
+
+        Used instead of plain IoU so a small box nested inside a larger one (a
+        common duplicate pattern) still scores ~1.0 and gets suppressed.
+        """
+        ix1 = max(a[0], b[0])
+        iy1 = max(a[1], b[1])
+        ix2 = min(a[2], b[2])
+        iy2 = min(a[3], b[3])
+        inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+        area_a = max(0.0, a[2] - a[0]) * max(0.0, a[3] - a[1])
+        area_b = max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+        smaller = min(area_a, area_b)
+        return inter / smaller if smaller > 0 else 0.0
+
+    @staticmethod
+    def _bbox_center_gap(a: List[float], b: List[float], frame_diag: float = 0.0) -> float:
+        """Center distance between two boxes as a fraction of their size (~1 = one
+        box-width apart), with a frame-size floor so tiny far boxes still merge."""
+        ca = ((a[0] + a[2]) / 2, (a[1] + a[3]) / 2)
+        cb = ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2)
+        dist = ((ca[0] - cb[0]) ** 2 + (ca[1] - cb[1]) ** 2) ** 0.5
+        diag_a = ((a[2] - a[0]) ** 2 + (a[3] - a[1]) ** 2) ** 0.5
+        diag_b = ((b[2] - b[0]) ** 2 + (b[3] - b[1]) ** 2) ** 0.5
+        denom = max((diag_a + diag_b) / 2, 0.1 * frame_diag)
+        return dist / denom if denom > 0 else float("inf")
+
+    def _suppress_duplicate_detections(
+        self,
+        detections: List[PPEDetection],
+        overlap_threshold: float = 0.45,
+        proximity_threshold: float = 0.7,
+    ) -> List[PPEDetection]:
+        """Greedy per-class NMS: drop a same-class box that overlaps, or (for
+        non-paired classes) sits within ~one box-width of, a higher-confidence one.
+        Boxes farther apart are kept, so different people each keep their own."""
+        # Paired PPE (two hands/feet): merge only on real overlap, never proximity.
+        paired = {"gloves", "safety shoes", "ear protectors"}
+
+        def _is_paired(name: str) -> bool:
+            return name.lower().removeprefix("no ").strip() in paired
+
+        frame_diag = 0.0
+        if detections:
+            frame_diag = (detections[0].image_width ** 2 + detections[0].image_height ** 2) ** 0.5
+
+        kept: List[PPEDetection] = []
+        for det in sorted(detections, key=lambda d: d.confidence, reverse=True):
+            allow_proximity = not _is_paired(det.class_name)
+            if any(
+                k.class_name == det.class_name
+                and (
+                    self._bbox_overlap(k.bbox, det.bbox) > overlap_threshold
+                    or (allow_proximity and self._bbox_center_gap(k.bbox, det.bbox, frame_diag) < proximity_threshold)
+                )
+                for k in kept
+            ):
+                continue
+            kept.append(det)
+        return kept
 
     def check_ppe_compliance(self, image: np.ndarray, required_ppe: List[str],
                            confidence_threshold: float = 0.4) -> PPEViolation:
@@ -246,46 +268,73 @@ class PPEDetector:
         )
 
     def _map_requirements_to_model_classes(self, required_ppe: List[str]) -> dict[str, str]:
+        # Every requirement term is resolved through the same CLIP-backed
+        # normalizer, so this is just a thin wrapper that drops unmappable items.
         mapped_requirements: dict[str, str] = {}
-        unmapped_items: list[str] = []
-
         for required in required_ppe:
-            normalized = self._normalize_required_item(required)
-            if normalized is not None:
-                mapped_requirements[required] = normalized
-            else:
-                unmapped_items.append(required)
-
-        if unmapped_items and self.use_clip and self.clip_client:
-            try:
-                clip_matches = self.clip_client.map_ppe_requirements(
-                    unmapped_items,
-                    self.ppe_classes,  # Use all 20 classes for better matching
-                )
-                for required, mapped_class in clip_matches.items():
-                    normalized = self._normalize_required_item(mapped_class)
-                    if normalized is not None:
-                        mapped_requirements[required] = normalized
-            except Exception as e:
-                print(f"CLIP mapping failed: {e}, falling back to simple matching")
-
+            resolved = self._normalize_required_item(required)
+            if resolved is not None:
+                mapped_requirements[required] = resolved
         return mapped_requirements
 
     def _normalize_required_item(self, item: str) -> str | None:
-        normalized = item.strip().lower()
-        if normalized in self.NORMALIZED_CLASS_MAP:
-            return self.NORMALIZED_CLASS_MAP[normalized]
+        """Resolve a free-text PPE term to one of the model's positive classes.
 
+        CLIP does the semantic mapping; there is no hand-maintained synonym
+        table. Results are cached per term, and a fuzzy word-overlap matcher is
+        used only when CLIP is unavailable or scores below threshold.
+        """
+        normalized = item.strip().lower()
+        if not normalized:
+            return None
+
+        # Identity: a term that is already a canonical class (including CLIP's
+        # own output) resolves without a model round-trip. This is the model's
+        # class list, not a synonym map.
+        for class_name in self.positive_ppe_classes:
+            if normalized == class_name.lower():
+                return class_name
+
+        if normalized in self._mapping_cache:
+            return self._mapping_cache[normalized]
+
+        resolved = self._resolve_with_clip(item)
+        if resolved is None:
+            resolved = self._resolve_with_fuzzy(normalized)
+
+        self._mapping_cache[normalized] = resolved
+        return resolved
+
+    def _resolve_with_clip(self, item: str) -> str | None:
+        """Map a single term to a positive PPE class via CLIP, or None."""
+        if not (self.use_clip and self.clip_client):
+            return None
+        try:
+            matches = self.clip_client.map_ppe_requirements([item], self.positive_ppe_classes)
+        except Exception as exc:
+            print(f"CLIP mapping failed for {item!r}: {exc}; falling back to fuzzy matching")
+            return None
+
+        mapped_class = matches.get(item)
+        if mapped_class is None:
+            return None
+        # map_ppe_requirements returns one of the candidate classes verbatim, so
+        # it is already canonical; guard anyway in case of casing drift.
+        for class_name in self.positive_ppe_classes:
+            if mapped_class.lower() == class_name.lower():
+                return class_name
+        return None
+
+    def _resolve_with_fuzzy(self, normalized: str) -> str | None:
+        """Fallback substring / word-overlap matcher used when CLIP can't map."""
         for class_name in self.positive_ppe_classes:
             class_normalized = class_name.lower()
             if (
-                normalized == class_normalized
-                or normalized in class_normalized
+                normalized in class_normalized
                 or class_normalized in normalized
                 or self._calculate_text_similarity(normalized, class_normalized) > 0.6
             ):
                 return class_name
-
         return None
 
     def _calculate_text_similarity(self, text1: str, text2: str) -> float:

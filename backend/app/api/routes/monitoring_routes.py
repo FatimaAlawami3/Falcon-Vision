@@ -44,6 +44,43 @@ ALERT_WRITE_COOLDOWN_SECONDS = 8.0
 RECENT_ALERT_SIGNATURES: dict[str, float] = {}
 
 
+def _parse_binary_frame(raw: bytes) -> tuple[bytes, dict]:
+    """Split a binary safety frame into its JPEG payload and JSON header.
+
+    Wire format (see frontend buildSafetyFrameMessage):
+        [4-byte big-endian header length][UTF-8 JSON header][raw JPEG bytes]
+
+    Falls back to treating the whole buffer as a headerless JPEG if the framing
+    is missing or malformed, so a stray binary message never crashes the loop.
+    """
+    if len(raw) < 4:
+        return raw, {}
+
+    header_length = int.from_bytes(raw[:4], byteorder="big")
+    if header_length <= 0 or 4 + header_length > len(raw):
+        return raw, {}
+
+    try:
+        header = json.loads(raw[4 : 4 + header_length].decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return raw, {}
+
+    if not isinstance(header, dict):
+        return raw, {}
+
+    return raw[4 + header_length :], header
+
+
+def _normalize_enabled_modules(payload_modules: object) -> set[str] | None:
+    if not isinstance(payload_modules, list):
+        return None
+    return {
+        str(module).strip().lower()
+        for module in payload_modules
+        if str(module).strip().lower() in {"ppe", "fall", "fire"}
+    }
+
+
 def _clone_upload_file(file_bytes: bytes, filename: str, content_type: str | None) -> StarletteUploadFile:
     headers = Headers({"content-type": content_type or "image/jpeg"})
     return StarletteUploadFile(
@@ -147,12 +184,13 @@ def _queue_alert_once(
     image_bytes: bytes,
     bbox: list[float] | None,
     zone_name: str | None = DEFAULT_MONITORING_ZONE,
+    dedupe_suffix: str = "",
 ) -> dict | None:
     if not organization_id:
         return None
 
     now = time.monotonic()
-    signature = f"{organization_id}:{category}:{title}:{message}"
+    signature = f"{organization_id}:{category}:{title}:{message}:{dedupe_suffix}"
     last_seen = RECENT_ALERT_SIGNATURES.get(signature, 0.0)
     if now - last_seen < ALERT_WRITE_COOLDOWN_SECONDS:
         return None
@@ -310,12 +348,18 @@ async def _run_safety_detection(
         fire_detection = fire_detection_result
     created_alerts = []
 
-    for violation_label in ppe_violations:
+    # One alert per violation box (cropped to it); a spatial bucket in the dedupe
+    # key lets people standing apart each alert without one person re-alerting.
+    violation_classes = set(ppe_violations)
+    bucket_cell = max(1.0, (ppe_detection.get("image_width") or 320) / 5.0)
+    for item in filtered_ppe_items:
+        violation_label = item["class_name"]
+        if violation_label not in violation_classes:
+            continue
         normalized_ppe = violation_label[3:] if violation_label.startswith("No ") else violation_label
-        matching_detection = next(
-            (item for item in filtered_ppe_items if item["class_name"] == violation_label),
-            None,
-        )
+        bbox = item["bbox"]
+        bucket_x = int(((bbox[0] + bbox[2]) / 2) // bucket_cell)
+        bucket_y = int(((bbox[1] + bbox[3]) / 2) // bucket_cell)
         alert = _queue_alert_once(
             alert_service=alert_service,
             organization_id=organization_id,
@@ -324,8 +368,9 @@ async def _run_safety_detection(
             category=RuleCategory.PPE,
             severity=Severity.HIGH,
             image_bytes=file_bytes,
-            bbox=matching_detection["bbox"] if matching_detection else None,
+            bbox=bbox,
             zone_name=effective_zone_type,
+            dedupe_suffix=f"{bucket_x}x{bucket_y}",
         )
         if alert is not None:
             created_alerts.append(alert)
@@ -607,7 +652,11 @@ async def monitoring_safety_websocket(
             enabled_modules: set[str] | None = None
 
             if message.get("bytes") is not None:
-                file_bytes = message["bytes"]
+                file_bytes, header = _parse_binary_frame(message["bytes"])
+                zone_type = header.get("zone_type") or DEFAULT_MONITORING_ZONE
+                frame_width = header.get("frame_width")
+                frame_height = header.get("frame_height")
+                enabled_modules = _normalize_enabled_modules(header.get("modules"))
             elif message.get("text") is not None:
                 payload = json.loads(message["text"])
                 if payload.get("type") != "frame":
@@ -630,13 +679,7 @@ async def monitoring_safety_websocket(
                 zone_type = payload.get("zone_type") or DEFAULT_MONITORING_ZONE
                 frame_width = payload.get("frame_width")
                 frame_height = payload.get("frame_height")
-                payload_modules = payload.get("modules")
-                if isinstance(payload_modules, list):
-                    enabled_modules = {
-                        str(module).strip().lower()
-                        for module in payload_modules
-                        if str(module).strip().lower() in {"ppe", "fall", "fire"}
-                    }
+                enabled_modules = _normalize_enabled_modules(payload.get("modules"))
             else:
                 continue
 

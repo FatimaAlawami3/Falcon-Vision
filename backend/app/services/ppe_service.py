@@ -1,3 +1,5 @@
+import asyncio
+import time
 from pathlib import Path
 from threading import Lock
 from typing import List
@@ -22,6 +24,11 @@ class PPEService:
     PROJECT_ROOT = Path(__file__).resolve().parents[3]
     _detector_cache: PPEDetector | None = None
     _detector_lock = Lock()
+    # Cache of required-PPE-per-org so the live loop doesn't hit the DB every
+    # frame (that lookup was ~400-700ms/frame). Rules change rarely, so a short
+    # TTL is safe. Shape: {org_id: (required_ppe_list, expiry_monotonic)}.
+    _required_ppe_cache: dict = {}
+    _REQUIRED_PPE_TTL_SECONDS = 20.0
 
     def __init__(
         self,
@@ -94,8 +101,9 @@ class PPEService:
         if image is None:
             raise AppError("Invalid image file")
 
-        # Detect PPE
-        detections = self.ppe_detector.detect_ppe(image)
+        # Detect PPE off the event loop — YOLO inference is blocking CPU/GPU work.
+        loop = asyncio.get_running_loop()
+        detections = await loop.run_in_executor(None, self.ppe_detector.detect_ppe, image)
 
         # Convert to response format
         detected_items = [
@@ -103,7 +111,6 @@ class PPEService:
                 "class_name": det.class_name,
                 "confidence": det.confidence,
                 "bbox": det.bbox,
-                "track_id": det.track_id,
             }
             for det in detections
         ]
@@ -257,7 +264,14 @@ class PPEService:
         return filtered_detected_items, filtered_violations
 
     async def get_live_required_ppe(self, organization_id) -> List[str]:
-        return await self._get_ppe_from_rules(organization_id)
+        key = str(organization_id)
+        now = time.monotonic()
+        cached = self._required_ppe_cache.get(key)
+        if cached is not None and cached[1] > now:
+            return cached[0]
+        result = await self._get_ppe_from_rules(organization_id)
+        self._required_ppe_cache[key] = (result, now + self._REQUIRED_PPE_TTL_SECONDS)
+        return result
 
     async def _get_ppe_from_rules(self, organization_id: str) -> List[str]:
         """Get required PPE from the latest extracted regulation file for the organization.

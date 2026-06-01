@@ -7,6 +7,62 @@ import { WarningModal } from '../../components/WarningModal';
 import { formatRoleLabel, getAccessToken, getAuthUser, saveAuthSession } from '../../lib/auth';
 import { updateMyProfile } from '../../lib/api';
 
+// Saudi mobile format: 05 followed by 8 digits (10 digits total).
+const PHONE_PATTERN = /^05\d{8}$/;
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// Letters (any language) and spaces only.
+const NAME_PATTERN = /^[\p{L} ]+$/u;
+const MIN_PASSWORD_LENGTH = 8;
+
+type ProfileField = 'fullName' | 'email' | 'phone' | 'jobTitle' | 'password';
+type ProfileErrors = Partial<Record<ProfileField, string>>;
+
+// `treatEmptyAsError` reports "required" on save but stays quiet while typing.
+// Password is optional everywhere (blank keeps the current password).
+function validateProfileField(field: ProfileField, rawValue: string, treatEmptyAsError: boolean): string | undefined {
+  const value = rawValue.trim();
+  switch (field) {
+    case 'fullName':
+      if (!value) return treatEmptyAsError ? 'Full name is required.' : undefined;
+      return NAME_PATTERN.test(value) ? undefined : 'Full name can only contain letters and spaces.';
+    case 'email':
+      if (!value) return treatEmptyAsError ? 'Email address is required.' : undefined;
+      return EMAIL_PATTERN.test(value) ? undefined : 'Enter a valid email (e.g. name@example.com).';
+    case 'phone':
+      if (!value) return treatEmptyAsError ? 'Phone number is required.' : undefined;
+      return PHONE_PATTERN.test(value)
+        ? undefined
+        : 'Phone must start with 05 and be 10 digits (e.g. 0512345678).';
+    case 'jobTitle':
+      if (!value) return treatEmptyAsError ? 'Job title is required.' : undefined;
+      return undefined;
+    case 'password':
+      if (!value) return undefined;
+      return value.length >= MIN_PASSWORD_LENGTH
+        ? undefined
+        : `Password must be at least ${MIN_PASSWORD_LENGTH} characters.`;
+    default:
+      return undefined;
+  }
+}
+
+function liveError(field: ProfileField, value: string): string | undefined {
+  return validateProfileField(field, value, false);
+}
+
+function inputClass(hasError: boolean): string {
+  return `w-full px-4 py-3 rounded-xl border ${
+    hasError ? 'border-red-500 focus:ring-red-500/40' : 'border-[#d4cbb7] focus:ring-[#ff8c42]/40'
+  } bg-[#f9f6ef] text-[#6b5d4f] focus:outline-none focus:ring-2`;
+}
+
+function FieldError({ message }: { message?: string }) {
+  if (!message) {
+    return null;
+  }
+  return <p className="mt-1 text-sm text-red-600">{message}</p>;
+}
+
 export function AdminProfilePage() {
   const currentUser = getAuthUser();
   const [fullName, setFullName] = useState(currentUser?.full_name ?? '');
@@ -15,6 +71,7 @@ export function AdminProfilePage() {
   const [jobTitle, setJobTitle] = useState(currentUser?.job_title ?? '');
   const [password, setPassword] = useState('');
   const [isSaving, setIsSaving] = useState(false);
+  const [errors, setErrors] = useState<ProfileErrors>({});
   const [modalState, setModalState] = useState({ isOpen: false, title: '', message: '' });
 
   const handleSave = async () => {
@@ -29,12 +86,22 @@ export function AdminProfilePage() {
       return;
     }
 
-    if (!fullName.trim() || !email.trim()) {
-      setModalState({
-        isOpen: true,
-        title: 'Missing Information',
-        message: 'Full name and email are required.',
-      });
+    const nextErrors: ProfileErrors = {};
+    const fields: Array<[ProfileField, string]> = [
+      ['fullName', fullName],
+      ['email', email],
+      ['phone', phone],
+      ['jobTitle', jobTitle],
+      ['password', password],
+    ];
+    for (const [field, value] of fields) {
+      const error = validateProfileField(field, value, true);
+      if (error) {
+        nextErrors[field] = error;
+      }
+    }
+    setErrors(nextErrors);
+    if (Object.keys(nextErrors).length > 0) {
       return;
     }
 
@@ -53,6 +120,7 @@ export function AdminProfilePage() {
 
       saveAuthSession(token, updatedUser);
       setPassword('');
+      setErrors({});
       setModalState({
         isOpen: true,
         title: 'Profile Updated',
@@ -94,9 +162,14 @@ export function AdminProfilePage() {
                 <input
                   type="text"
                   value={fullName}
-                  onChange={(e) => setFullName(e.target.value)}
-                  className="w-full px-4 py-3 rounded-xl border border-[#d4cbb7] bg-[#f9f6ef] text-[#6b5d4f] focus:outline-none focus:ring-2 focus:ring-[#ff8c42]/40"
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    setFullName(value);
+                    setErrors((current) => ({ ...current, fullName: liveError('fullName', value) }));
+                  }}
+                  className={inputClass(Boolean(errors.fullName))}
                 />
+                <FieldError message={errors.fullName} />
               </div>
 
               <div>
@@ -104,19 +177,30 @@ export function AdminProfilePage() {
                 <input
                   type="email"
                   value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="w-full px-4 py-3 rounded-xl border border-[#d4cbb7] bg-[#f9f6ef] text-[#6b5d4f] focus:outline-none focus:ring-2 focus:ring-[#ff8c42]/40"
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    setEmail(value);
+                    setErrors((current) => ({ ...current, email: liveError('email', value) }));
+                  }}
+                  className={inputClass(Boolean(errors.email))}
                 />
+                <FieldError message={errors.email} />
               </div>
 
               <div>
                 <label className="block text-[#6b5d4f] mb-2">Phone</label>
                 <input
                   type="text"
+                  placeholder="0512345678"
                   value={phone}
-                  onChange={(e) => setPhone(e.target.value)}
-                  className="w-full px-4 py-3 rounded-xl border border-[#d4cbb7] bg-[#f9f6ef] text-[#6b5d4f] focus:outline-none focus:ring-2 focus:ring-[#ff8c42]/40"
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    setPhone(value);
+                    setErrors((current) => ({ ...current, phone: liveError('phone', value) }));
+                  }}
+                  className={inputClass(Boolean(errors.phone))}
                 />
+                <FieldError message={errors.phone} />
               </div>
 
               <div>
@@ -124,9 +208,14 @@ export function AdminProfilePage() {
                 <input
                   type="text"
                   value={jobTitle}
-                  onChange={(e) => setJobTitle(e.target.value)}
-                  className="w-full px-4 py-3 rounded-xl border border-[#d4cbb7] bg-[#f9f6ef] text-[#6b5d4f] focus:outline-none focus:ring-2 focus:ring-[#ff8c42]/40"
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    setJobTitle(value);
+                    setErrors((current) => ({ ...current, jobTitle: liveError('jobTitle', value) }));
+                  }}
+                  className={inputClass(Boolean(errors.jobTitle))}
                 />
+                <FieldError message={errors.jobTitle} />
               </div>
 
               <div>
@@ -154,10 +243,15 @@ export function AdminProfilePage() {
                 <input
                   type="password"
                   value={password}
-                  onChange={(e) => setPassword(e.target.value)}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    setPassword(value);
+                    setErrors((current) => ({ ...current, password: liveError('password', value) }));
+                  }}
                   placeholder="Leave blank to keep current password"
-                  className="w-full px-4 py-3 rounded-xl border border-[#d4cbb7] bg-[#f9f6ef] text-[#6b5d4f] focus:outline-none focus:ring-2 focus:ring-[#ff8c42]/40"
+                  className={inputClass(Boolean(errors.password))}
                 />
+                <FieldError message={errors.password} />
               </div>
 
               <button

@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 import logging
@@ -26,12 +27,33 @@ from app.core.exceptions import AppError
 logger = logging.getLogger(__name__)
 
 
+async def _warm_up_ppe_models() -> None:
+    """Load + warm the PPE model at startup so the first camera frame is fast.
+
+    Runs in the background (doesn't delay readiness) and is non-fatal.
+    """
+    try:
+        import numpy as np
+        from app.services.ppe_service import PPEService
+
+        def _warm() -> None:
+            detector = PPEService._get_detector()
+            detector.detect_ppe(np.zeros((180, 320, 3), dtype=np.uint8))
+
+        await asyncio.get_running_loop().run_in_executor(None, _warm)
+        logger.info("PPE model warmed up")
+    except Exception as exc:
+        logger.warning("PPE model warm-up skipped: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     await connect_to_mongo()
+    warmup_task = asyncio.create_task(_warm_up_ppe_models())
     try:
         yield
     finally:
+        warmup_task.cancel()
         await close_mongo_connection()
 
 

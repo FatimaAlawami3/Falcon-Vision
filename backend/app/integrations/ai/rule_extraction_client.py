@@ -256,9 +256,14 @@ class SafetyRulesExtractor:
             prompt = f"""Analyze the safety document text below and extract specific safety regulations into JSON format.
 
     TASK 1: PPE Extraction
-    - Extract ONLY a list of physical safety equipment (e.g., "Hard Hat", "Safety Boots").
+    - Extract ONLY personal protective equipment (PPE) that a worker WEARS ON THEIR BODY
+      (e.g., "Hard Hat", "Safety Boots", "Gloves", "Safety Glasses", "Ear Plugs", "Respirator").
+    - Do NOT include equipment that is not worn on the body. Specifically EXCLUDE fire and
+      rescue equipment (fire extinguisher, fire blanket, fire hose, fire alarm, smoke detector),
+      first aid kits, eye-wash stations, signage/warning signs, tools, machinery, and any
+      fixed or portable facility equipment.
     - Do NOT extract behavioral rules, colors, sizes, or descriptions.
-    - Extract only mandatory equipment for employees.
+    - Extract only mandatory equipment that employees must wear.
 
     TASK 2: Fall, Heat, and Access Monitoring
     - If the text requires monitoring for falls/heights or fire/smoke/heat, set "active" to "Yes".

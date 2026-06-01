@@ -1,4 +1,6 @@
 """Service for fire/smoke detection with multimodal fusion and rule-based monitoring."""
+import asyncio
+import time
 from pathlib import Path
 from threading import Lock
 from typing import List
@@ -23,6 +25,10 @@ class FireDetectionService:
     _detector_cache: FireSmokeDetector | None = None
     _detector_initialized = False
     _detector_lock = Lock()
+    # Cache zone rule-active checks so the live loop doesn't hit the DB every
+    # frame. {(org_id, zone): (is_active, expiry_monotonic)}.
+    _rule_cache: dict = {}
+    _RULE_TTL_SECONDS = 20.0
 
     def __init__(self, rule_repository: ExtractedRuleRepository):
         """Initialize fire detection service.
@@ -154,8 +160,11 @@ class FireDetectionService:
         if image is None:
             raise ValueError("Invalid image format")
 
-        # Run multimodal detection
-        result = self.detector.detect_with_fusion(image, sensor_data)
+        # Run multimodal detection off the event loop — YOLO/sensor inference is blocking work.
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None, self.detector.detect_with_fusion, image, sensor_data
+        )
 
         # Prepare response
         return {
@@ -243,6 +252,12 @@ class FireDetectionService:
         Returns:
             True if fire detection should be active, False otherwise
         """
+        cache_key = (str(organization_id), zone_type)
+        now = time.monotonic()
+        cached = self._rule_cache.get(cache_key)
+        if cached is not None and cached[1] > now:
+            return cached[0]
+
         try:
             from app.core.constants import RuleCategory
 
@@ -254,7 +269,9 @@ class FireDetectionService:
             )
 
             # If any fire rule exists for this zone, detection is active
-            return len(rules) > 0
+            is_active = len(rules) > 0
+            self._rule_cache[cache_key] = (is_active, now + self._RULE_TTL_SECONDS)
+            return is_active
 
         except Exception as e:
             print(f"Error checking fire detection rule: {e}")

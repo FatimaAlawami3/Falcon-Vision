@@ -8,23 +8,36 @@ import { Footer } from '../components/Footer';
 import { registerOrganization } from '../lib/api';
 import logoImage from '../../assets/images/logo.png';
 
+// Letters (any language) and spaces only.
+const NAME_REGEX = /^[\p{L} ]+$/u;
+// Saudi mobile format: 05 followed by 8 digits (10 digits total).
+const PHONE_REGEX = /^05\d{8}$/;
+
 const signUpSchema = z.object({
   organizationName: z.string().min(2, 'Organization name is required'),
-  industry: z.string().optional(),
-  country: z.string().optional(),
-  city: z.string().optional(),
-  address: z.string().optional(),
-  adminFirstName: z.string().min(1, 'First name is required'),
-  adminLastName: z.string().min(1, 'Last name is required'),
-  adminPhone: z.string().optional(),
-  adminEmail: z.string().email('Please enter a valid email address'),
+  industry: z.string().min(1, 'Industry is required'),
+  country: z.string().min(1, 'Country is required'),
+  city: z.string().min(1, 'City is required'),
+  address: z.string().min(1, 'Address is required'),
+  adminFirstName: z.string()
+    .min(1, 'First name is required')
+    .regex(NAME_REGEX, 'First name can only contain letters and spaces'),
+  adminLastName: z.string()
+    .min(1, 'Last name is required')
+    .regex(NAME_REGEX, 'Last name can only contain letters and spaces'),
+  adminPhone: z.string()
+    .min(1, 'Phone number is required')
+    .regex(PHONE_REGEX, 'Phone must start with 05 and be 10 digits (e.g. 0512345678)'),
+  adminEmail: z.string()
+    .min(1, 'Email is required')
+    .email('Please enter a valid email address'),
   password: z.string()
     .min(8, 'At least 8 characters')
     .regex(/[A-Z]/, 'Contains uppercase letter')
     .regex(/[a-z]/, 'Contains lowercase letter')
     .regex(/[0-9]/, 'Contains number')
     .regex(/[^A-Za-z0-9]/, 'Contains symbol'),
-  confirmPassword: z.string()
+  confirmPassword: z.string().min(1, 'Please confirm your password')
 }).refine((data) => data.password === data.confirmPassword, {
   message: "Passwords do not match",
   path: ["confirmPassword"],
@@ -37,6 +50,7 @@ export function SignUpPage() {
 
   const { register, handleSubmit, watch, formState: { errors, isSubmitting } } = useForm<SignUpFormValues>({
     resolver: zodResolver(signUpSchema),
+    mode: 'onChange',
     defaultValues: {
       organizationName: '',
       industry: '',
@@ -76,7 +90,7 @@ export function SignUpPage() {
         admin_phone: data.adminPhone?.trim() || undefined,
       });
 
-      toast.success('Organization created successfully. Please log in.');
+      toast.success('Admin account created successfully. Please log in.');
       navigate('/login', { replace: true });
     } catch (error) {
       const message =
@@ -120,8 +134,9 @@ export function SignUpPage() {
                 <input
                   type="text"
                   {...register('industry')}
-                  className="w-full px-3 py-2 rounded-xl border border-[#e0d5c7] focus:outline-none focus:border-[#d87545] bg-white text-[#4a3c2a] text-sm"
+                  className={`w-full px-3 py-2 rounded-xl border ${errors.industry ? 'border-red-500' : 'border-[#e0d5c7]'} focus:outline-none focus:border-[#d87545] bg-white text-[#4a3c2a] text-sm`}
                 />
+                {errors.industry && <p className="text-red-500 text-xs mt-1">{errors.industry.message}</p>}
               </div>
 
               <div>
@@ -129,8 +144,9 @@ export function SignUpPage() {
                 <input
                   type="text"
                   {...register('country')}
-                  className="w-full px-3 py-2 rounded-xl border border-[#e0d5c7] focus:outline-none focus:border-[#d87545] bg-white text-[#4a3c2a] text-sm"
+                  className={`w-full px-3 py-2 rounded-xl border ${errors.country ? 'border-red-500' : 'border-[#e0d5c7]'} focus:outline-none focus:border-[#d87545] bg-white text-[#4a3c2a] text-sm`}
                 />
+                {errors.country && <p className="text-red-500 text-xs mt-1">{errors.country.message}</p>}
               </div>
 
               <div>
@@ -138,8 +154,9 @@ export function SignUpPage() {
                 <input
                   type="text"
                   {...register('city')}
-                  className="w-full px-3 py-2 rounded-xl border border-[#e0d5c7] focus:outline-none focus:border-[#d87545] bg-white text-[#4a3c2a] text-sm"
+                  className={`w-full px-3 py-2 rounded-xl border ${errors.city ? 'border-red-500' : 'border-[#e0d5c7]'} focus:outline-none focus:border-[#d87545] bg-white text-[#4a3c2a] text-sm`}
                 />
+                {errors.city && <p className="text-red-500 text-xs mt-1">{errors.city.message}</p>}
               </div>
 
               <div>
@@ -147,8 +164,9 @@ export function SignUpPage() {
                 <input
                   type="text"
                   {...register('address')}
-                  className="w-full px-3 py-2 rounded-xl border border-[#e0d5c7] focus:outline-none focus:border-[#d87545] bg-white text-[#4a3c2a] text-sm"
+                  className={`w-full px-3 py-2 rounded-xl border ${errors.address ? 'border-red-500' : 'border-[#e0d5c7]'} focus:outline-none focus:border-[#d87545] bg-white text-[#4a3c2a] text-sm`}
                 />
+                {errors.address && <p className="text-red-500 text-xs mt-1">{errors.address.message}</p>}
               </div>
 
               <div>
@@ -185,9 +203,11 @@ export function SignUpPage() {
                 <label className="block text-[#8b7355] mb-1.5 text-sm">Admin Phone</label>
                 <input
                   type="tel"
+                  placeholder="0512345678"
                   {...register('adminPhone')}
-                  className="w-full px-3 py-2 rounded-xl border border-[#e0d5c7] focus:outline-none focus:border-[#d87545] bg-white text-[#4a3c2a] text-sm"
+                  className={`w-full px-3 py-2 rounded-xl border ${errors.adminPhone ? 'border-red-500' : 'border-[#e0d5c7]'} focus:outline-none focus:border-[#d87545] bg-white text-[#4a3c2a] text-sm`}
                 />
+                {errors.adminPhone && <p className="text-red-500 text-xs mt-1">{errors.adminPhone.message}</p>}
               </div>
 
               <div>

@@ -1,4 +1,6 @@
 """Service for fall detection with rule-based monitoring."""
+import asyncio
+import time
 from io import BytesIO
 from pathlib import Path
 from threading import Lock
@@ -19,6 +21,10 @@ class FallDetectionService:
     PROJECT_ROOT = Path(__file__).resolve().parents[3]
     _detector_cache: FallDetector | None = None
     _detector_lock = Lock()
+    # Cache zone rule-active checks so the live loop doesn't hit the DB every
+    # frame. {(org_id, zone): (is_active, expiry_monotonic)}.
+    _rule_cache: dict = {}
+    _RULE_TTL_SECONDS = 20.0
 
     def __init__(self, rule_repository: ExtractedRuleRepository):
         """Initialize fall detection service.
@@ -97,8 +103,9 @@ class FallDetectionService:
                 "zone_type": zone_type,
             }
 
-        # Detect falls
-        detections = self.detector.detect_falls(image)
+        # Detect falls off the event loop — YOLO inference is blocking CPU/GPU work.
+        loop = asyncio.get_running_loop()
+        detections = await loop.run_in_executor(None, self.detector.detect_falls, image)
 
         # Prepare response
         falls_detected = [d for d in detections if d.is_fallen]
@@ -137,6 +144,12 @@ class FallDetectionService:
         Returns:
             True if fall detection should be active, False otherwise
         """
+        cache_key = (str(organization_id), zone_type)
+        now = time.monotonic()
+        cached = self._rule_cache.get(cache_key)
+        if cached is not None and cached[1] > now:
+            return cached[0]
+
         try:
             from app.core.constants import RuleCategory
 
@@ -148,7 +161,9 @@ class FallDetectionService:
             )
 
             # If any fall rule exists for this zone, detection is active
-            return len(rules) > 0
+            is_active = len(rules) > 0
+            self._rule_cache[cache_key] = (is_active, now + self._RULE_TTL_SECONDS)
+            return is_active
 
         except Exception as e:
             print(f"Error checking fall detection rule: {e}")

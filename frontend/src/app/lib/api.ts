@@ -222,7 +222,6 @@ export interface PPEDetectionItem {
   class_name: string;
   confidence: number;
   bbox: number[];
-  track_id?: number | string | null;
 }
 
 export interface PPEDetectionResponse {

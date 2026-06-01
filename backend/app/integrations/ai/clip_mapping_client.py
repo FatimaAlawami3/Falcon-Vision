@@ -20,13 +20,32 @@ class CLIPMappingClient:
         try:
             import clip
             import torch
+        except ImportError as exc:
+            raise ImportError(
+                "clip and torch packages are required. Install with: "
+                "pip install git+https://github.com/openai/CLIP.git torch"
+            ) from exc
 
+        # A failed weight download or CUDA error raises a non-ImportError; catch
+        # it here instead of leaving a half-built client callers think is usable.
+        try:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
             self.model, self.preprocess = clip.load("ViT-B/32", device=self.device)
             self.tokenizer = clip.tokenize
+        except Exception as exc:
+            raise RuntimeError(f"Failed to load CLIP model: {exc}") from exc
 
-        except ImportError:
-            raise ImportError("clip and torch packages are required. Install with: pip install git+https://github.com/openai/CLIP.git torch")
+        # Cache class embeddings by class-name tuple; the set is fixed, so mapping
+        # is essentially free after the first call.
+        self._class_embeddings_cache: Dict[Tuple[str, ...], Dict[str, np.ndarray]] = {}
+
+        # Smoke-test so a broken install fails loudly here, not silently at runtime.
+        try:
+            probe = self.encode_text(["a photo of a safety helmet"])
+        except Exception as exc:
+            raise RuntimeError(f"CLIP model failed its initialization smoke-test: {exc}") from exc
+        if probe is None or probe.shape[0] != 1:
+            raise RuntimeError("CLIP model returned an unexpected embedding shape during smoke-test")
 
     def encode_text(self, texts: List[str]) -> np.ndarray:
         """Encode text descriptions to embeddings.
@@ -58,6 +77,11 @@ class CLIPMappingClient:
         Returns:
             Dictionary mapping class names to embeddings
         """
+        cache_key = tuple(class_names)
+        cached = self._class_embeddings_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         # Create descriptive prompts for each class
         prompts = []
         for class_name in class_names:
@@ -82,11 +106,12 @@ class CLIPMappingClient:
             class_embedding = np.mean(embeddings[start_idx:end_idx], axis=0)
             class_embeddings[class_name] = class_embedding
 
+        self._class_embeddings_cache[cache_key] = class_embeddings
         return class_embeddings
 
     def match_text_to_classes(self, text_descriptions: List[str],
                             detected_classes: List[str],
-                            threshold: float = 0.25) -> List[TextImageMatch]:
+                            threshold: float = 0.45) -> List[TextImageMatch]:
         """Match text descriptions to detected image classes.
 
         Args:
@@ -123,11 +148,16 @@ class CLIPMappingClient:
                     best_match = class_name
 
             if best_score >= threshold:
+                # Rescale the [threshold, 1] similarity band onto [0, 1] so the
+                # reported confidence reflects the margin above threshold rather
+                # than blindly doubling the raw cosine score.
+                confidence = (best_score - threshold) / (1.0 - threshold)
+                confidence = float(min(max(confidence, 0.0), 1.0))
                 matches.append(TextImageMatch(
                     text_description=text_desc,
                     image_class=best_match,
-                    similarity_score=best_score,
-                    confidence=min(best_score * 2, 1.0)  # Scale confidence
+                    similarity_score=float(best_score),
+                    confidence=confidence,
                 ))
 
         return matches

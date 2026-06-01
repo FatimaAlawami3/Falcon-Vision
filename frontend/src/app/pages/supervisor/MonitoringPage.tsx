@@ -31,29 +31,46 @@ import {
 } from '../../lib/api';
 
 const TRACKING_MIN_INTERVAL_MS = 8;
-const TRACKING_SMOOTHING_FACTOR = 0.6;
-const TRACKING_BOX_MAX_AGE_MS = 100;
-const OVERLAY_MOVING_TRACK_MAX_MISSING_MS = 900;
+const TRACKING_SMOOTHING_FACTOR = 0.9;
+const TRACKING_BOX_MAX_AGE_MS = 500;
+// Keep a box alive across brief detection dropouts so it doesn't blink out.
+const OVERLAY_MOVING_TRACK_MAX_MISSING_MS = 1500;
 const OVERLAY_STATIONARY_TRACK_MAX_MISSING_MS = 1500;
-const OVERLAY_PREDICTION_MAX_MS = 120;
-const OVERLAY_SMOOTHING_FACTOR = 0.7;
-const OVERLAY_MOTION_IMMEDIATE_CATCHUP = 0.92;
+const OVERLAY_PREDICTION_MAX_MS = 220; // how far ahead (ms) to project velocity between detections
+const OVERLAY_REANCHOR_LEAD_MAX_MS = 230; // latency compensation when a fresh (stale) detection lands
+const OVERLAY_PREDICTION_MAX_LEAD_FRACTION = 1.05; // cap the lead at this × box diagonal
+const VELOCITY_SMOOTHING = 0.72; // EMA weight per new velocity sample (higher = more responsive)
+const OVERLAY_MAX_CONSECUTIVE_MISSES = 2; // drop a track after this many unmatched detection frames
+const OVERLAY_SMOOTHING_FACTOR = 0.95;
+const OVERLAY_MOTION_IMMEDIATE_CATCHUP = 0.9;
 const OVERLAY_MATCH_DISTANCE_THRESHOLD = 1.4;
 const OVERLAY_MATCH_IOU_THRESHOLD = 0.01;
 const OVERLAY_MOTION_CENTER_EPSILON = 0.003;
 const OVERLAY_MOTION_SIZE_EPSILON = 0.01;
-const OVERLAY_DUPLICATE_IOU_THRESHOLD = 0.40;
-const OVERLAY_DUPLICATE_CENTER_THRESHOLD = 0.22;
-const PPE_OVERLAY_MIN_CONFIDENCE = 0.45;
+const OVERLAY_DUPLICATE_IOU_THRESHOLD = 0.45; // merge same-label boxes when they clearly overlap (one object)
+const OVERLAY_DUPLICATE_PROXIMITY = 0.7; // ...or when clustered within ~one box-width (spread duplicates on one person)
+const OVERLAY_DUPLICATE_FRAME_FLOOR = 0.1; // floor for tiny far-away boxes: treat the "box size" as >=10% of the frame
+const PPE_OVERLAY_MIN_CONFIDENCE = 0.5; // higher → only confident, stable detections (cuts flicker/duplicates)
 const PPE_NEGATIVE_OVERLAY_MIN_CONFIDENCE = 0.5;
+const PPE_PAIRED_OVERLAY_MIN_CONFIDENCE = 0.35; // gloves/shoes/ear protectors are small — lower floor
+// Client-side pixel tracker: follow each box by matching its patch against the
+// live frame between server detections.
+const PIXEL_TRACKER_ENABLED = true;
+const PIXEL_TRACKER_SAMPLE_WIDTH = 160;
+const PIXEL_TRACKER_INTERVAL_MS = 33;
+const PIXEL_TRACKER_SEARCH_RADIUS = 12;
+const PIXEL_TRACKER_SAMPLE_STRIDE = 3;
+const PIXEL_TRACKER_MIN_AGE_MS = 20;
+const PIXEL_TRACKER_MATCH_TOLERANCE = 30;
+const PIXEL_TRACKER_MAX_SHIFT_RATIO = 0.12;
 const DEFAULT_MONITORING_ZONE = 'production';
 const MAX_INFERENCE_FRAME_WIDTH = 320;
-const INFERENCE_JPEG_QUALITY = 0.35;
+const INFERENCE_JPEG_QUALITY = 0.6;
 const FRAME_LOOP_INTERVAL_MS = 6;
 const SAFETY_DETECTION_FRAME_SKIP = 1;
-const FACE_DETECTION_INTERVAL_MS = 700;
-const HAZARD_DETECTION_INTERVAL_MS = 900;
-const DETECTION_WARMUP_MS = 200;
+const FACE_DETECTION_INTERVAL_MS = 2000;
+const HAZARD_DETECTION_INTERVAL_MS = 2000;
+const DETECTION_WARMUP_MS = 0; // no warmup — detect as soon as the socket is open and the video has frames
 
 type AlertRow = {
   id: string;
@@ -90,6 +107,7 @@ type OverlayTrack = {
   lastUpdatedAt: number;
   velocityX: number;
   velocityY: number;
+  misses: number; // consecutive detection frames this track went unmatched; dropped past a small limit so ghosts never linger
 };
 
 type LocalFaceBox = {
@@ -125,6 +143,14 @@ declare global {
 
 type CapturedVideoFrame = {
   blob: Blob;
+  width: number;
+  height: number;
+};
+
+// A downscaled single-channel (luma) snapshot of the video, used by the
+// client-side pixel tracker to follow boxes between server detections.
+type GrayscaleFrame = {
+  data: Uint8Array;
   width: number;
   height: number;
 };
@@ -180,6 +206,13 @@ function normalizeDetectionBox(
 function getPpeOverlayMinConfidence(className: string) {
   const normalizedClassName = className.trim().toLowerCase();
 
+  // Gloves/shoes/ear protectors are small — on a 2nd/farther person they detect at
+  // lower confidence. Use a lower floor so they still show, without loosening the
+  // other (bigger) classes that don't need it.
+  if (isPairedOverlayLabel(className)) {
+    return PPE_PAIRED_OVERLAY_MIN_CONFIDENCE;
+  }
+
   if (normalizedClassName.startsWith('no ')) {
     return PPE_NEGATIVE_OVERLAY_MIN_CONFIDENCE;
   }
@@ -232,37 +265,24 @@ async function captureVideoFrame(
   });
 }
 
-function blobToDataUrl(blob: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ''));
-    reader.onerror = () => reject(reader.error || new Error('Failed to read frame'));
-    reader.readAsDataURL(blob);
-  });
-}
+// Pack a JPEG frame as a binary WebSocket message: a 4-byte big-endian header
+// length, the UTF-8 JSON header, then the raw JPEG bytes. This avoids the
+// base64/JSON.stringify round-trip (which inflates the payload by ~33% and adds
+// async FileReader overhead) and lets the backend read metadata without
+// decoding the image first.
+async function buildSafetyFrameMessage(
+  blob: Blob,
+  header: Record<string, unknown>,
+): Promise<ArrayBuffer> {
+  const imageBytes = new Uint8Array(await blob.arrayBuffer());
+  const headerBytes = new TextEncoder().encode(JSON.stringify(header));
 
-function formatRecognitionStatus(
-  result: FaceRecognitionResponse | null,
-  hasDetectedFace: boolean,
-  isRecognitionPending: boolean,
-) {
-  if (hasDetectedFace && isRecognitionPending) {
-    return 'Face detected. Waiting for recognition';
-  }
+  const message = new Uint8Array(4 + headerBytes.length + imageBytes.length);
+  new DataView(message.buffer).setUint32(0, headerBytes.length, false);
+  message.set(headerBytes, 4);
+  message.set(imageBytes, 4 + headerBytes.length);
 
-  if (!result) {
-    return hasDetectedFace ? 'Face detected. Waiting for recognition' : 'Waiting for recognition';
-  }
-
-  if (result.status === 'no_face') {
-    return 'No face detected';
-  }
-
-  if (result.status === 'no_gallery') {
-    return 'Face detected. No uploaded employee face gallery is available.';
-  }
-
-  return result.authorized ? 'Authorized employee detected' : 'Unauthorized or unknown face';
+  return message.buffer;
 }
 
 function getFaceOverlayLabel(result: FaceRecognitionResponse) {
@@ -343,6 +363,116 @@ function getLocalFaceBoxStyle(
   };
 }
 
+function strokeRoundedRectPath(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius: number,
+) {
+  const r = Math.min(radius, width / 2, height / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + width, y, x + width, y + height, r);
+  ctx.arcTo(x + width, y + height, x, y + height, r);
+  ctx.arcTo(x, y + height, x, y, r);
+  ctx.arcTo(x, y, x + width, y, r);
+  ctx.closePath();
+}
+
+// Draw all overlay boxes + labels onto a single canvas, fully cleared each call.
+function drawOverlays(
+  canvas: HTMLCanvasElement | null,
+  video: HTMLVideoElement | null,
+  tracks: OverlayTrack[],
+  faceBox: LocalFaceBox | null,
+) {
+  if (!canvas) {
+    return;
+  }
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    return;
+  }
+
+  const cssWidth = video?.clientWidth ?? 0;
+  const cssHeight = video?.clientHeight ?? 0;
+  const dpr = window.devicePixelRatio || 1;
+  const pixelWidth = Math.round(cssWidth * dpr);
+  const pixelHeight = Math.round(cssHeight * dpr);
+  if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+    canvas.width = pixelWidth;
+    canvas.height = pixelHeight;
+  }
+
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssWidth, cssHeight);
+  if (!video || !cssWidth || !cssHeight) {
+    return;
+  }
+
+  const drawBox = (
+    left: number,
+    top: number,
+    width: number,
+    height: number,
+    borderColor: string,
+    badgeColor: string,
+    label: string,
+  ) => {
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = borderColor;
+    ctx.strokeRect(left, top, width, height);
+
+    ctx.font = '600 13px system-ui, sans-serif';
+    ctx.textBaseline = 'middle';
+    const paddingX = 8;
+    const badgeHeight = 20;
+    const textWidth = ctx.measureText(label).width;
+    const badgeWidth = textWidth + paddingX * 2;
+    const badgeY = top - badgeHeight - 2;
+    ctx.fillStyle = badgeColor;
+    strokeRoundedRectPath(ctx, left, badgeY, badgeWidth, badgeHeight, 10);
+    ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(label, left + paddingX, badgeY + badgeHeight / 2 + 0.5);
+  };
+
+  for (const box of tracks) {
+    const style = getOverlayStyle(box, video);
+    if (!style) {
+      continue;
+    }
+    const label =
+      box.label + (typeof box.confidence === 'number' ? ` ${(box.confidence * 100).toFixed(0)}%` : '');
+    drawBox(
+      parseFloat(style.left),
+      parseFloat(style.top),
+      parseFloat(style.width),
+      parseFloat(style.height),
+      box.borderColor,
+      box.badgeColor,
+      label,
+    );
+  }
+
+  if (faceBox) {
+    const style = getLocalFaceBoxStyle(faceBox, video);
+    if (style) {
+      drawBox(
+        parseFloat(style.left),
+        parseFloat(style.top),
+        parseFloat(style.width),
+        parseFloat(style.height),
+        '#f59e0b',
+        '#b45309',
+        'Face detected',
+      );
+    }
+  }
+}
+
 function getOverlayPalette(label: string) {
   const normalized = label.toLowerCase();
   const exactPalette: Record<string, { borderColor: string; badgeColor: string }> = {
@@ -412,20 +542,29 @@ function getOverlayIntersectionRatio(a: OverlayTrack, b: OverlayTrack) {
   const intersectionArea = intersectionWidth * intersectionHeight;
   const areaA = Math.max(0, a.currentX2 - a.currentX1) * Math.max(0, a.currentY2 - a.currentY1);
   const areaB = Math.max(0, b.currentX2 - b.currentX1) * Math.max(0, b.currentY2 - b.currentY1);
-  const unionArea = areaA + areaB - intersectionArea;
+  // Overlap over the SMALLER box (not IoU) so a small box nested in a larger one
+  // — a common duplicate — still scores ~1.0 and gets merged.
+  const smaller = Math.min(areaA, areaB);
 
-  return unionArea > 0 ? intersectionArea / unionArea : 0;
+  return smaller > 0 ? intersectionArea / smaller : 0;
 }
 
-function getPendingOverlayCenterDistance(a: OverlayDetection, b: OverlayDetection) {
-  const centerAX = (a.x1 + a.x2) / 2;
-  const centerAY = (a.y1 + a.y2) / 2;
-  const centerBX = (b.x1 + b.x2) / 2;
-  const centerBY = (b.y1 + b.y2) / 2;
-  const distance = Math.hypot(centerAX - centerBX, centerAY - centerBY);
-  const diagonal = Math.hypot(a.sourceWidth, a.sourceHeight);
-
-  return diagonal > 0 ? distance / diagonal : Number.POSITIVE_INFINITY;
+// Center distance between two tracks as a fraction of their average size
+// (~0 same spot, ~1 one box-width apart). Lets us merge spread duplicates on one
+// object while keeping far-apart boxes (different people) separate.
+function getOverlayTrackCenterGap(a: OverlayTrack, b: OverlayTrack) {
+  const ax = (a.currentX1 + a.currentX2) / 2;
+  const ay = (a.currentY1 + a.currentY2) / 2;
+  const bx = (b.currentX1 + b.currentX2) / 2;
+  const by = (b.currentY1 + b.currentY2) / 2;
+  const dist = Math.hypot(ax - bx, ay - by);
+  const diagA = Math.hypot(a.currentX2 - a.currentX1, a.currentY2 - a.currentY1);
+  const diagB = Math.hypot(b.currentX2 - b.currentX1, b.currentY2 - b.currentY1);
+  const frameDiag = Math.hypot(a.sourceWidth, a.sourceHeight);
+  // Floor the denominator so tiny far-away boxes don't make the gap blow up —
+  // clustered duplicates still merge regardless of how small the boxes are.
+  const denom = Math.max((diagA + diagB) / 2, OVERLAY_DUPLICATE_FRAME_FLOOR * frameDiag);
+  return denom > 0 ? dist / denom : Number.POSITIVE_INFINITY;
 }
 
 function getPendingOverlayIntersectionRatio(a: OverlayDetection, b: OverlayDetection) {
@@ -438,9 +577,34 @@ function getPendingOverlayIntersectionRatio(a: OverlayDetection, b: OverlayDetec
   const intersectionArea = intersectionWidth * intersectionHeight;
   const areaA = Math.max(0, a.x2 - a.x1) * Math.max(0, a.y2 - a.y1);
   const areaB = Math.max(0, b.x2 - b.x1) * Math.max(0, b.y2 - b.y1);
-  const unionArea = areaA + areaB - intersectionArea;
+  // Overlap over the SMALLER box (not IoU) so nested duplicate boxes still merge.
+  const smaller = Math.min(areaA, areaB);
 
-  return unionArea > 0 ? intersectionArea / unionArea : 0;
+  return smaller > 0 ? intersectionArea / smaller : 0;
+}
+
+function getPendingOverlayCenterGap(a: OverlayDetection, b: OverlayDetection) {
+  const ax = (a.x1 + a.x2) / 2;
+  const ay = (a.y1 + a.y2) / 2;
+  const bx = (b.x1 + b.x2) / 2;
+  const by = (b.y1 + b.y2) / 2;
+  const dist = Math.hypot(ax - bx, ay - by);
+  const diagA = Math.hypot(a.x2 - a.x1, a.y2 - a.y1);
+  const diagB = Math.hypot(b.x2 - b.x1, b.y2 - b.y1);
+  const frameDiag = Math.hypot(a.sourceWidth, a.sourceHeight);
+  // Floor the denominator so tiny far-away boxes don't make the gap blow up —
+  // clustered duplicates still merge regardless of how small the boxes are.
+  const denom = Math.max((diagA + diagB) / 2, OVERLAY_DUPLICATE_FRAME_FLOOR * frameDiag);
+  return denom > 0 ? dist / denom : Number.POSITIVE_INFINITY;
+}
+
+// PPE that legitimately appears as a PAIR per person (two hands, two feet). For
+// these, only a true overlap (same physical item detected twice) is a duplicate
+// — proximity must NOT merge them, or the two gloves/shoes collapse into one.
+// Matches both positive and "No …" variants.
+const PAIRED_PPE_BASE_CLASSES = new Set(['gloves', 'safety shoes', 'ear protectors']);
+function isPairedOverlayLabel(label: string) {
+  return PAIRED_PPE_BASE_CLASSES.has(label.toLowerCase().replace(/^no\s+/, '').trim());
 }
 
 function getOverlayBackendTrackKey(overlay: Pick<OverlayTrack | OverlayDetection, 'id' | 'backendTrackId'>) {
@@ -457,13 +621,8 @@ function dedupeOverlayDetections(overlays: OverlayDetection[]) {
 
   sortedOverlays.forEach((overlay) => {
     const isDuplicate = keptOverlays.some((keptOverlay) => {
-      const keptBackendTrackKey = getOverlayBackendTrackKey(keptOverlay);
-      const overlayBackendTrackKey = getOverlayBackendTrackKey(overlay);
-
-      if (keptBackendTrackKey && overlayBackendTrackKey && keptBackendTrackKey !== overlayBackendTrackKey) {
-        return false;
-      }
-
+      // A backend track-id mismatch must NOT block dedupe: ByteTrack reassigns ids
+      // on motion, so one object can carry two ids. Dedupe on label + overlap.
       if (
         keptOverlay.label !== overlay.label ||
         keptOverlay.sourceWidth !== overlay.sourceWidth ||
@@ -472,10 +631,17 @@ function dedupeOverlayDetections(overlays: OverlayDetection[]) {
         return false;
       }
 
-      return (
-        getPendingOverlayIntersectionRatio(keptOverlay, overlay) > OVERLAY_DUPLICATE_IOU_THRESHOLD ||
-        getPendingOverlayCenterDistance(keptOverlay, overlay) <= OVERLAY_DUPLICATE_CENTER_THRESHOLD
-      );
+      // A real overlap is always a duplicate (same physical item detected twice).
+      if (getPendingOverlayIntersectionRatio(keptOverlay, overlay) > OVERLAY_DUPLICATE_IOU_THRESHOLD) {
+        return true;
+      }
+      // Paired items (gloves/shoes) legitimately appear twice on one person, so
+      // only overlap merges them — never mere proximity. For single-per-person
+      // classes, also merge spread boxes clustered within ~one box-width.
+      if (isPairedOverlayLabel(overlay.label)) {
+        return false;
+      }
+      return getPendingOverlayCenterGap(keptOverlay, overlay) < OVERLAY_DUPLICATE_PROXIMITY;
     });
 
     if (!isDuplicate) {
@@ -514,6 +680,7 @@ function createOverlayTrack(
     lastUpdatedAt: now,
     velocityX: 0,
     velocityY: 0,
+    misses: 0,
   };
 }
 
@@ -522,13 +689,9 @@ function getOverlayKind(overlay: Pick<OverlayTrack | OverlayDetection, 'id'>) {
 }
 
 function shouldDedupeOverlayTrack(a: OverlayTrack, b: OverlayTrack) {
-  const backendTrackKeyA = getOverlayBackendTrackKey(a);
-  const backendTrackKeyB = getOverlayBackendTrackKey(b);
-
-  if (backendTrackKeyA && backendTrackKeyB && backendTrackKeyA !== backendTrackKeyB) {
-    return false;
-  }
-
+  // A backend track-id mismatch must NOT block dedupe: ByteTrack reassigns ids on
+  // motion, so the same object can carry two ids. Dedupe on kind + label and let
+  // the caller's overlap check decide.
   const kindA = getOverlayKind(a);
   const kindB = getOverlayKind(b);
 
@@ -561,8 +724,13 @@ function isCompatibleTrackDetection(track: OverlayTrack, detection: OverlayDetec
   const trackBackendTrackKey = getOverlayBackendTrackKey(track);
   const detectionBackendTrackKey = getOverlayBackendTrackKey(detection);
 
-  if (trackBackendTrackKey && detectionBackendTrackKey) {
-    return trackBackendTrackKey === detectionBackendTrackKey;
+  // A matching backend track id is a strong positive signal, but a MISMATCH must
+  // not veto association: ByteTrack reassigns ids on fast motion at low frame
+  // rates, so fall back to kind+label and let the distance scorer link
+  // spatially-close boxes. Otherwise every frame spawns a new track (velocity
+  // stays 0) and boxes freeze-then-jump instead of tracking.
+  if (trackBackendTrackKey && detectionBackendTrackKey && trackBackendTrackKey === detectionBackendTrackKey) {
+    return true;
   }
 
   return trackKind === 'face' || track.label === detection.label;
@@ -572,6 +740,15 @@ function getOverlayDisplayCenter(overlay: Pick<OverlayTrack, 'currentX1' | 'curr
   return {
     x: (overlay.currentX1 + overlay.currentX2) / 2,
     y: (overlay.currentY1 + overlay.currentY2) / 2,
+  };
+}
+
+// Center of the last raw detection (target box) — used to measure velocity
+// between consecutive detections rather than against the predicted display box.
+function getOverlayTargetCenter(overlay: Pick<OverlayTrack, 'targetX1' | 'targetY1' | 'targetX2' | 'targetY2'>) {
+  return {
+    x: (overlay.targetX1 + overlay.targetX2) / 2,
+    y: (overlay.targetY1 + overlay.targetY2) / 2,
   };
 }
 
@@ -607,14 +784,15 @@ function getTrackDetectionIntersectionRatio(track: OverlayTrack, detection: Over
 }
 
 function getTrackDetectionMotion(track: OverlayTrack, detection: OverlayDetection) {
-  const trackCenter = getOverlayDisplayCenter(track);
+  // Compare the previous raw detection (target) to this one, not the predicted box.
+  const trackCenter = getOverlayTargetCenter(track);
   const detectionCenter = getDetectionCenter(detection);
   const diagonal = Math.hypot(track.sourceWidth, track.sourceHeight);
   const centerDelta = diagonal > 0
     ? Math.hypot(trackCenter.x - detectionCenter.x, trackCenter.y - detectionCenter.y) / diagonal
     : Number.POSITIVE_INFINITY;
-  const trackWidth = Math.max(1, track.currentX2 - track.currentX1);
-  const trackHeight = Math.max(1, track.currentY2 - track.currentY1);
+  const trackWidth = Math.max(1, track.targetX2 - track.targetX1);
+  const trackHeight = Math.max(1, track.targetY2 - track.targetY1);
   const detectionWidth = Math.max(1, detection.x2 - detection.x1);
   const detectionHeight = Math.max(1, detection.y2 - detection.y1);
   const widthDelta = Math.abs(detectionWidth - trackWidth) / trackWidth;
@@ -643,6 +821,23 @@ function keepLiveOverlayTracks(overlays: OverlayTrack[], now: number) {
   return overlays.filter((overlay) => now - overlay.lastSeenAt <= getTrackMissingTimeoutMs(overlay));
 }
 
+// Clamp a predicted lead vector to a fraction of the box diagonal (keeps small/far
+// boxes with noisy velocity from being flung; direction preserved).
+function clampLeadToBoxSize(
+  dx: number,
+  dy: number,
+  box: Pick<OverlayTrack, 'currentX1' | 'currentY1' | 'currentX2' | 'currentY2'>,
+) {
+  const boxDiagonal = Math.hypot(box.currentX2 - box.currentX1, box.currentY2 - box.currentY1);
+  const maxLead = OVERLAY_PREDICTION_MAX_LEAD_FRACTION * boxDiagonal;
+  const magnitude = Math.hypot(dx, dy);
+  if (magnitude <= maxLead || magnitude === 0) {
+    return { x: dx, y: dy };
+  }
+  const scale = maxLead / magnitude;
+  return { x: dx * scale, y: dy * scale };
+}
+
 function advanceOverlayTrack(overlay: OverlayTrack, now: number): OverlayTrack | null {
   const ageMs = now - overlay.lastSeenAt;
   const missingTimeoutMs = getTrackMissingTimeoutMs(overlay);
@@ -651,27 +846,232 @@ function advanceOverlayTrack(overlay: OverlayTrack, now: number): OverlayTrack |
     return null;
   }
 
-  // Box was seen recently — interpolate toward target
-  if (ageMs <= 100) {
-    const predictionMs = Math.min(ageMs, OVERLAY_PREDICTION_MAX_MS);
-    const predictedX1 = overlay.targetX1 + overlay.velocityX * predictionMs;
-    const predictedY1 = overlay.targetY1 + overlay.velocityY * predictionMs;
-    const predictedX2 = overlay.targetX2 + overlay.velocityX * predictionMs;
-    const predictedY2 = overlay.targetY2 + overlay.velocityY * predictionMs;
-    const alpha = OVERLAY_SMOOTHING_FACTOR;
+  // Project the box forward along its tracked velocity for the WHOLE gap between
+  // detections (capped), not just the first moment — this compensates for the
+  // server's inference latency so a fast-moving box keeps up instead of freezing
+  // at the last detection. Stationary tracks have velocity 0, so they stay put
+  // and never drift.
+  const predictionMs = Math.min(ageMs, OVERLAY_PREDICTION_MAX_MS);
+  // Clamp the lead to a fraction of the box's own size. A small/far box has a
+  // noisy, inflated velocity (a few px of detection jitter is huge relative to a
+  // tiny box), so an uncapped lead flings it around. Capping the lead to the box
+  // size keeps a far box pinned on the object while still letting a large close
+  // box lead generously.
+  const { x: leadX, y: leadY } = clampLeadToBoxSize(
+    overlay.velocityX * predictionMs,
+    overlay.velocityY * predictionMs,
+    overlay,
+  );
+  const predictedX1 = overlay.targetX1 + leadX;
+  const predictedY1 = overlay.targetY1 + leadY;
+  const predictedX2 = overlay.targetX2 + leadX;
+  const predictedY2 = overlay.targetY2 + leadY;
+  const alpha = OVERLAY_SMOOTHING_FACTOR;
 
-    return {
-      ...overlay,
-      currentX1: overlay.currentX1 + (predictedX1 - overlay.currentX1) * alpha,
-      currentY1: overlay.currentY1 + (predictedY1 - overlay.currentY1) * alpha,
-      currentX2: overlay.currentX2 + (predictedX2 - overlay.currentX2) * alpha,
-      currentY2: overlay.currentY2 + (predictedY2 - overlay.currentY2) * alpha,
-      lastUpdatedAt: now,
-    };
+  return {
+    ...overlay,
+    currentX1: overlay.currentX1 + (predictedX1 - overlay.currentX1) * alpha,
+    currentY1: overlay.currentY1 + (predictedY1 - overlay.currentY1) * alpha,
+    currentX2: overlay.currentX2 + (predictedX2 - overlay.currentX2) * alpha,
+    currentY2: overlay.currentY2 + (predictedY2 - overlay.currentY2) * alpha,
+    lastUpdatedAt: now,
+  };
+}
+
+// Draw the current video frame to an offscreen canvas at reduced size and
+// return its luma channel. Returns null if the frame isn't ready or the canvas
+// is tainted (e.g. cross-origin stream).
+function sampleVideoGrayscale(
+  video: HTMLVideoElement,
+  canvas: HTMLCanvasElement,
+  targetWidth: number,
+): GrayscaleFrame | null {
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+  if (!vw || !vh) {
+    return null;
   }
 
-  // Box is stale — hold perfectly still, do not drift
-  return overlay;
+  const scale = Math.min(1, targetWidth / vw);
+  const width = Math.max(1, Math.round(vw * scale));
+  const height = Math.max(1, Math.round(vh * scale));
+
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  if (!context) {
+    return null;
+  }
+
+  context.drawImage(video, 0, 0, width, height);
+  let rgba: ImageData;
+  try {
+    rgba = context.getImageData(0, 0, width, height);
+  } catch {
+    return null;
+  }
+
+  const gray = new Uint8Array(width * height);
+  const source = rgba.data;
+  for (let i = 0, p = 0; i < source.length; i += 4, p += 1) {
+    // Rec. 601 luma via an integer approximation (>> 8 == / 256).
+    gray[p] = (source[i] * 77 + source[i + 1] * 150 + source[i + 2] * 29) >> 8;
+  }
+  return { data: gray, width, height };
+}
+
+// Estimate the integer (dx, dy) translation of a box patch between two
+// grayscale frames using a small SAD block-matching search. Coordinates are in
+// grayscale-frame pixels. Returns null when the patch is too small to match.
+function estimateBoxTranslation(
+  prev: GrayscaleFrame,
+  curr: GrayscaleFrame,
+  box: { x1: number; y1: number; x2: number; y2: number },
+  searchRadius: number,
+  stride: number,
+): { dx: number; dy: number; meanAbsDiff: number } | null {
+  if (prev.width !== curr.width || prev.height !== curr.height) {
+    return null;
+  }
+
+  const { width, height } = prev;
+  const bx1 = Math.max(0, Math.floor(box.x1));
+  const by1 = Math.max(0, Math.floor(box.y1));
+  const bx2 = Math.min(width - 1, Math.ceil(box.x2));
+  const by2 = Math.min(height - 1, Math.ceil(box.y2));
+  if (bx2 - bx1 < 6 || by2 - by1 < 6) {
+    return null;
+  }
+
+  const prevData = prev.data;
+  const currData = curr.data;
+  let bestDx = 0;
+  let bestDy = 0;
+  let bestScore = Number.POSITIVE_INFINITY;
+
+  for (let dy = -searchRadius; dy <= searchRadius; dy += 1) {
+    for (let dx = -searchRadius; dx <= searchRadius; dx += 1) {
+      let sum = 0;
+      let count = 0;
+      let aborted = false;
+      for (let y = by1; y <= by2; y += stride) {
+        const ny = y + dy;
+        if (ny < 0 || ny >= height) {
+          aborted = true;
+          break;
+        }
+        const prevRow = y * width;
+        const currRow = ny * width;
+        for (let x = bx1; x <= bx2; x += stride) {
+          const nx = x + dx;
+          if (nx < 0 || nx >= width) {
+            continue;
+          }
+          const diff = prevData[prevRow + x] - currData[currRow + nx];
+          sum += diff < 0 ? -diff : diff;
+          count += 1;
+        }
+      }
+      if (aborted || count === 0) {
+        continue;
+      }
+      // Tiny bias toward zero motion so static patches don't jitter on ties.
+      const score = sum / count + (dx === 0 && dy === 0 ? 0 : 0.01);
+      if (score < bestScore) {
+        bestScore = score;
+        bestDx = dx;
+        bestDy = dy;
+      }
+    }
+  }
+
+  if (!Number.isFinite(bestScore)) {
+    return null;
+  }
+  return { dx: bestDx, dy: bestDy, meanAbsDiff: bestScore };
+}
+
+// Nudge a track's box to follow the actual pixels between server detections.
+// Falls back to the unchanged (velocity-extrapolated) track whenever the match
+// is weak, the patch is tiny, or the implied jump is implausibly large.
+function applyPixelFlowToTrack(
+  track: OverlayTrack,
+  prev: GrayscaleFrame,
+  curr: GrayscaleFrame,
+  now: number,
+): OverlayTrack {
+  if (now - track.lastSeenAt < PIXEL_TRACKER_MIN_AGE_MS) {
+    return track;
+  }
+  if (track.sourceWidth <= 0 || track.sourceHeight <= 0) {
+    return track;
+  }
+
+  const scaleX = curr.width / track.sourceWidth;
+  const scaleY = curr.height / track.sourceHeight;
+
+  const result = estimateBoxTranslation(
+    prev,
+    curr,
+    {
+      x1: track.currentX1 * scaleX,
+      y1: track.currentY1 * scaleY,
+      x2: track.currentX2 * scaleX,
+      y2: track.currentY2 * scaleY,
+    },
+    PIXEL_TRACKER_SEARCH_RADIUS,
+    PIXEL_TRACKER_SAMPLE_STRIDE,
+  );
+
+  if (!result) {
+    return track;
+  }
+  if (result.meanAbsDiff > PIXEL_TRACKER_MATCH_TOLERANCE) {
+    return track;
+  }
+  if (result.dx === 0 && result.dy === 0) {
+    return track;
+  }
+
+  const shiftX = result.dx / scaleX;
+  const shiftY = result.dy / scaleY;
+  if (
+    Math.abs(shiftX) > track.sourceWidth * PIXEL_TRACKER_MAX_SHIFT_RATIO ||
+    Math.abs(shiftY) > track.sourceHeight * PIXEL_TRACKER_MAX_SHIFT_RATIO
+  ) {
+    return track;
+  }
+
+  return {
+    ...track,
+    currentX1: track.currentX1 + shiftX,
+    currentY1: track.currentY1 + shiftY,
+    currentX2: track.currentX2 + shiftX,
+    currentY2: track.currentY2 + shiftY,
+    targetX1: track.targetX1 + shiftX,
+    targetY1: track.targetY1 + shiftY,
+    targetX2: track.targetX2 + shiftX,
+    targetY2: track.targetY2 + shiftY,
+    lastUpdatedAt: now,
+  };
+}
+
+// Below this velocity (px/ms) an axis counts as "not moving" → correct freely.
+const REANCHOR_DIRECTION_EPSILON = 0.02;
+
+// Ease a coordinate toward the detection anchor, but never against the motion
+// direction — avoids the box dipping back to a stale detection then catching up.
+function reanchorNoBackstep(current: number, anchor: number, velocity: number) {
+  const moved = current + (anchor - current) * OVERLAY_MOTION_IMMEDIATE_CATCHUP;
+  if (velocity > REANCHOR_DIRECTION_EPSILON) {
+    return Math.max(moved, current);
+  }
+  if (velocity < -REANCHOR_DIRECTION_EPSILON) {
+    return Math.min(moved, current);
+  }
+  return moved;
 }
 
 function reconcileTracks(
@@ -729,27 +1129,29 @@ function reconcileTracks(
       usedCurrentIndexes.add(bestMatchIndex);
       const previous = current[bestMatchIndex];
       const elapsedMs = Math.max(now - previous.lastSeenAt, TRACKING_MIN_INTERVAL_MS);
-      const previousCenter = getOverlayDisplayCenter(previous);
+      const previousCenter = getOverlayTargetCenter(previous);
       const nextCenter = getDetectionCenter(overlay);
       const motion = getTrackDetectionMotion(previous, overlay);
-      const nextVelocityX = motion.hasMeaningfulMotion
-        ? (nextCenter.x - previousCenter.x) / elapsedMs
-        : 0;
-      const nextVelocityY = motion.hasMeaningfulMotion
-        ? (nextCenter.y - previousCenter.y) / elapsedMs
-        : 0;
-      const nextCurrentX1 = motion.hasMeaningfulMotion
-        ? previous.currentX1 + (overlay.x1 - previous.currentX1) * OVERLAY_MOTION_IMMEDIATE_CATCHUP
-        : previous.currentX1;
-      const nextCurrentY1 = motion.hasMeaningfulMotion
-        ? previous.currentY1 + (overlay.y1 - previous.currentY1) * OVERLAY_MOTION_IMMEDIATE_CATCHUP
-        : previous.currentY1;
-      const nextCurrentX2 = motion.hasMeaningfulMotion
-        ? previous.currentX2 + (overlay.x2 - previous.currentX2) * OVERLAY_MOTION_IMMEDIATE_CATCHUP
-        : previous.currentX2;
-      const nextCurrentY2 = motion.hasMeaningfulMotion
-        ? previous.currentY2 + (overlay.y2 - previous.currentY2) * OVERLAY_MOTION_IMMEDIATE_CATCHUP
-        : previous.currentY2;
+      const rawVelocityX = motion.hasMeaningfulMotion ? (nextCenter.x - previousCenter.x) / elapsedMs : 0;
+      const rawVelocityY = motion.hasMeaningfulMotion ? (nextCenter.y - previousCenter.y) / elapsedMs : 0;
+      // EMA of velocity: jitter averages out, consistent motion accumulates.
+      const nextVelocityX = previous.velocityX * (1 - VELOCITY_SMOOTHING) + rawVelocityX * VELOCITY_SMOOTHING;
+      const nextVelocityY = previous.velocityY * (1 - VELOCITY_SMOOTHING) + rawVelocityY * VELOCITY_SMOOTHING;
+      // Re-anchor to a latency-compensated position, clamped to the box size.
+      const leadMs = Math.min(elapsedMs, OVERLAY_REANCHOR_LEAD_MAX_MS);
+      const { x: anchorLeadX, y: anchorLeadY } = clampLeadToBoxSize(
+        nextVelocityX * leadMs,
+        nextVelocityY * leadMs,
+        { currentX1: overlay.x1, currentY1: overlay.y1, currentX2: overlay.x2, currentY2: overlay.y2 },
+      );
+      const anchorX1 = overlay.x1 + anchorLeadX;
+      const anchorY1 = overlay.y1 + anchorLeadY;
+      const anchorX2 = overlay.x2 + anchorLeadX;
+      const anchorY2 = overlay.y2 + anchorLeadY;
+      const nextCurrentX1 = reanchorNoBackstep(previous.currentX1, anchorX1, nextVelocityX);
+      const nextCurrentY1 = reanchorNoBackstep(previous.currentY1, anchorY1, nextVelocityY);
+      const nextCurrentX2 = reanchorNoBackstep(previous.currentX2, anchorX2, nextVelocityX);
+      const nextCurrentY2 = reanchorNoBackstep(previous.currentY2, anchorY2, nextVelocityY);
       nextOverlays.push({
         ...previous,
         backendTrackId: overlay.backendTrackId ?? previous.backendTrackId,
@@ -772,6 +1174,7 @@ function reconcileTracks(
         lastUpdatedAt: now,
         velocityX: nextVelocityX,
         velocityY: nextVelocityY,
+        misses: 0, // matched this frame → reset the miss counter
       });
       return;
     }
@@ -779,10 +1182,29 @@ function reconcileTracks(
     nextOverlays.push(createOverlayTrack(overlay, now));
   });
 
+  // Classes that were detected somewhere in THIS frame. An un-linked old track
+  // of one of these classes is a ghost — the same object that moved or got a new
+  // tracker id — so drop it instead of leaving it stranded at the old position.
+  const seenThisFrame = new Set(incoming.map((overlay) => `${getOverlayKind(overlay)}|${overlay.label}`));
+
   current.forEach((overlay, currentIndex) => {
-    if (!usedCurrentIndexes.has(currentIndex) && now - overlay.lastSeenAt <= getTrackMissingTimeoutMs(overlay)) {
-      nextOverlays.push(overlay);
+    if (usedCurrentIndexes.has(currentIndex)) {
+      return;
     }
+    if (now - overlay.lastSeenAt > getTrackMissingTimeoutMs(overlay)) {
+      return;
+    }
+    if (seenThisFrame.has(`${getOverlayKind(overlay)}|${overlay.label}`)) {
+      return; // same class already detected this frame → this leftover is a ghost
+    }
+    // Went unmatched this detection frame. Bridge a single dropped frame, but drop
+    // the track once it misses too many in a row so a frozen ghost can never
+    // linger (and never stack into a duplicate when its class reappears offset).
+    const nextMisses = overlay.misses + 1;
+    if (nextMisses >= OVERLAY_MAX_CONSECUTIVE_MISSES) {
+      return;
+    }
+    nextOverlays.push({ ...overlay, misses: nextMisses });
   });
 
   return keepLiveOverlayTracks(nextOverlays, now).filter((overlay, overlayIndex) => {
@@ -790,7 +1212,11 @@ function reconcileTracks(
       (candidate, candidateIndex) =>
         candidateIndex > overlayIndex &&
         shouldDedupeOverlayTrack(candidate, overlay) &&
-        getOverlayIntersectionRatio(candidate, overlay) > OVERLAY_DUPLICATE_IOU_THRESHOLD,
+        // Overlap = same physical item (always merge). Proximity-merge only for
+        // single-per-person classes; paired items (gloves/shoes) keep both boxes.
+        (getOverlayIntersectionRatio(candidate, overlay) > OVERLAY_DUPLICATE_IOU_THRESHOLD ||
+          (!isPairedOverlayLabel(overlay.label) &&
+            getOverlayTrackCenterGap(candidate, overlay) < OVERLAY_DUPLICATE_PROXIMITY)),
     );
 
     return newerDuplicateIndex < 0;
@@ -1074,16 +1500,13 @@ export function MonitoringPage() {
   });
   const [exitConfirm, setExitConfirm] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
-  const [isRecognizing, setIsRecognizing] = useState(false);
-  const [recognitionResult, setRecognitionResult] = useState<FaceRecognitionResponse | null>(null);
+  const [, setIsRecognizing] = useState(false);
+  const [, setRecognitionResult] = useState<FaceRecognitionResponse | null>(null);
   const [recognitionResults, setRecognitionResults] = useState<FaceRecognitionResponse[]>([]);
-  const [ppeResult, setPpeResult] = useState<LivePPEResult | null>(null);
-  const [fallResult, setFallResult] = useState<FallDetectionResponse | null>(null);
-  const [fireResult, setFireResult] = useState<FireDetectionResponse | null>(null);
   const [cameraMessage, setCameraMessage] = useState('Start the camera to begin live monitoring.');
   const [hasLiveVideo, setHasLiveVideo] = useState(false);
   const [trackedFaceBox, setTrackedFaceBox] = useState<LocalFaceBox | null>(null);
-  const [isLocalTrackingEnabled, setIsLocalTrackingEnabled] = useState(false);
+  const [, setIsLocalTrackingEnabled] = useState(false);
   const [isFaceRecognitionActive, setIsFaceRecognitionActive] = useState(true);
   const [activeSafetyModules, setActiveSafetyModules] = useState<SafetyModule[]>(['ppe', 'fall', 'fire']);
   const [alerts, setAlerts] = useState<AlertRow[]>([]);
@@ -1102,9 +1525,13 @@ export function MonitoringPage() {
   const faceDetectorRef = useRef<BrowserFaceDetector | null>(null);
   const trackingFrameRef = useRef<number | null>(null);
   const overlayAnimationFrameRef = useRef<number | null>(null);
+  const flowCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const prevGrayRef = useRef<GrayscaleFrame | null>(null);
   const lastTrackingRunAtRef = useRef(0);
   const lastTrackedFaceBoxRef = useRef<LocalFaceBox | null>(null);
   const lastTrackedFaceAtRef = useRef(0);
+  const faceVelocityRef = useRef({ x: 0, y: 0 }); // video px/ms, for predicting the face box between detects
   const safetySocketRef = useRef<WebSocket | null>(null);
   const sessionStartedAtRef = useRef<string | null>(null);
   const emptySafetyResultStreakRef = useRef(0);
@@ -1323,9 +1750,6 @@ export function MonitoringPage() {
       setIsFaceRecognitionActive(true);
       setRecognitionResult(null);
       setRecognitionResults([]);
-      setPpeResult(null);
-      setFallResult(null);
-      setFireResult(null);
       setHeadCount(null);
       setSessionStartedAt(null);
       sessionStartedAtRef.current = null;
@@ -1471,6 +1895,7 @@ export function MonitoringPage() {
     }
 
     let isCancelled = false;
+    let lastFlowAt = 0;
 
     const animateOverlays = () => {
       if (isCancelled) {
@@ -1478,6 +1903,24 @@ export function MonitoringPage() {
       }
 
       const now = performance.now();
+
+      // Snapshot the live frame once per animation frame for the pixel tracker.
+      let currGray: GrayscaleFrame | null = null;
+      const video = videoRef.current;
+      if (
+        PIXEL_TRACKER_ENABLED &&
+        video &&
+        video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+        now - lastFlowAt >= PIXEL_TRACKER_INTERVAL_MS
+      ) {
+        lastFlowAt = now;
+        if (!flowCanvasRef.current) {
+          flowCanvasRef.current = document.createElement('canvas');
+        }
+        currGray = sampleVideoGrayscale(video, flowCanvasRef.current, PIXEL_TRACKER_SAMPLE_WIDTH);
+      }
+      const prevGray = prevGrayRef.current;
+
       setOverlayTracks((current) => {
         if (current.length === 0) {
           return current;
@@ -1487,8 +1930,33 @@ export function MonitoringPage() {
           .map((overlay) => TrackManager.advanceTrack(overlay, now))
           .filter((overlay): overlay is OverlayTrack => Boolean(overlay));
 
-        return advanced;
+        if (!currGray || !prevGray) {
+          return advanced;
+        }
+        const framePrev = prevGray;
+        const frameCurr = currGray;
+        return advanced.map((overlay) => applyPixelFlowToTrack(overlay, framePrev, frameCurr, now));
       });
+
+      if (currGray) {
+        prevGrayRef.current = currGray;
+      }
+
+      // Project the face box forward between (slow) browser detects so it follows
+      // continuously instead of freezing at the last detection.
+      const faceAnchor = lastTrackedFaceBoxRef.current;
+      if (faceAnchor && now - lastTrackedFaceAtRef.current <= TRACKING_BOX_MAX_AGE_MS) {
+        const lead = Math.min(now - lastTrackedFaceAtRef.current, OVERLAY_PREDICTION_MAX_MS);
+        let dx = faceVelocityRef.current.x * lead;
+        let dy = faceVelocityRef.current.y * lead;
+        const maxLead = OVERLAY_PREDICTION_MAX_LEAD_FRACTION * Math.hypot(faceAnchor.width, faceAnchor.height);
+        const mag = Math.hypot(dx, dy);
+        if (mag > maxLead && mag > 0) {
+          dx *= maxLead / mag;
+          dy *= maxLead / mag;
+        }
+        setTrackedFaceBox({ ...faceAnchor, x: faceAnchor.x + dx, y: faceAnchor.y + dy });
+      }
 
       overlayAnimationFrameRef.current = window.requestAnimationFrame(animateOverlays);
     };
@@ -1497,12 +1965,36 @@ export function MonitoringPage() {
 
     return () => {
       isCancelled = true;
+      prevGrayRef.current = null;
       if (overlayAnimationFrameRef.current !== null) {
         window.cancelAnimationFrame(overlayAnimationFrameRef.current);
         overlayAnimationFrameRef.current = null;
       }
     };
   }, [isStreaming, hasLiveVideo]);
+
+  // The instant monitoring stops, wipe overlay state so stale/frozen detection
+  // boxes can never linger on screen after the camera goes offline.
+  useEffect(() => {
+    if (!isStreaming) {
+      setOverlayTracks([]);
+      prevGrayRef.current = null;
+    }
+  }, [isStreaming]);
+
+  // Render every overlay box onto the single canvas. Runs on each track change
+  // (~60fps while moving) and fully clears+redraws — no per-box DOM, so the GPU
+  // can never retain a "frozen" ghost box, during streaming or after stop.
+  useEffect(() => {
+    const hasRecogFace = overlayTracks.some((overlay) => overlay.id.startsWith('face-recognition'));
+    const faceBox = isStreaming && hasLiveVideo && trackedFaceBox && !hasRecogFace ? trackedFaceBox : null;
+    drawOverlays(
+      overlayCanvasRef.current,
+      videoRef.current,
+      isStreaming && hasLiveVideo ? overlayTracks : [],
+      faceBox,
+    );
+  }, [overlayTracks, trackedFaceBox, isStreaming, hasLiveVideo]);
 
   useEffect(() => {
     if (!isStreaming || !hasLiveVideo) {
@@ -1570,6 +2062,19 @@ export function MonitoringPage() {
             nextBox,
             TRACKING_SMOOTHING_FACTOR,
           );
+
+          // Velocity from the previous anchor to this detection (for forward projection).
+          const previousAnchor = lastTrackedFaceBoxRef.current;
+          const dtMs = Math.max(now - lastTrackedFaceAtRef.current, TRACKING_MIN_INTERVAL_MS);
+          if (previousAnchor && dtMs <= TRACKING_BOX_MAX_AGE_MS) {
+            const prevCx = previousAnchor.x + previousAnchor.width / 2;
+            const prevCy = previousAnchor.y + previousAnchor.height / 2;
+            const nextCx = smoothedBox.x + smoothedBox.width / 2;
+            const nextCy = smoothedBox.y + smoothedBox.height / 2;
+            faceVelocityRef.current = { x: (nextCx - prevCx) / dtMs, y: (nextCy - prevCy) / dtMs };
+          } else {
+            faceVelocityRef.current = { x: 0, y: 0 };
+          }
 
           lastTrackedFaceBoxRef.current = smoothedBox;
           lastTrackedFaceAtRef.current = now;
@@ -1697,27 +2202,15 @@ export function MonitoringPage() {
         safetyResult.fire.detections.length > 0;
       emptySafetyResultStreakRef.current = hasDetections ? 0 : emptySafetyResultStreakRef.current + 1;
 
-      setPpeResult((current) =>
-        renderablePpeItems.length > 0 || !current
-          ? { ...safetyResult.ppe, detected_items: renderablePpeItems }
-          : current
-      );
-      setFallResult((current) =>
-        safetyResult.fall.detections.length > 0 || !current ? safetyResult.fall : current
-      );
-      setFireResult((current) =>
-        safetyResult.fire.detections.length > 0 || !current ? safetyResult.fire : current
-      );
-
       const nextOverlays = TrackManager.dedupeDetections([
         ...renderablePpeItems.map((item, index) => {
           const palette = getOverlayPalette(item.class_name);
           const sourceWidth = safetyResult.ppe.image_width || frameWidth;
           const sourceHeight = safetyResult.ppe.image_height || frameHeight;
           const box = normalizeDetectionBox(item.bbox, sourceWidth, sourceHeight);
-          const backendTrackId = item.track_id ?? null;
+          const backendTrackId = null; // PPE boxes match spatially; no backend id needed
           return {
-            id: backendTrackId !== null ? `ppe-${backendTrackId}-${item.class_name}` : `ppe-${index}-${item.class_name}`,
+            id: `ppe-${index}-${item.class_name}`,
             backendTrackId,
             label: item.class_name,
             confidence: item.confidence,
@@ -1773,10 +2266,7 @@ export function MonitoringPage() {
         }),
       ]);
 
-      setOverlayTracks((current) => {
-        const nextTracked = TrackManager.reconcileTracks(current, nextOverlays, now);
-        return nextTracked;
-      });
+      setOverlayTracks((current) => TrackManager.reconcileTracks(current, nextOverlays, now));
 
       if (Array.isArray(safetyResult.alerts) && safetyResult.alerts.length > 0) {
         setAlerts((current) => {
@@ -1981,19 +2471,18 @@ export function MonitoringPage() {
           return;
         }
 
-        const image = await blobToDataUrl(capturedFrame.blob);
-        if (isCancelled) {
-          return;
-        }
-
-        socket.send(JSON.stringify({
+        const message = await buildSafetyFrameMessage(capturedFrame.blob, {
           type: 'frame',
-          image,
           frame_width: capturedFrame.width,
           frame_height: capturedFrame.height,
           zone_type: DEFAULT_MONITORING_ZONE,
           modules,
-        }));
+        });
+        if (isCancelled) {
+          return;
+        }
+
+        socket.send(message);
         safetyRequestSentAtRef.current = performance.now();
       } catch (error) {
         console.error('Safety monitoring failed:', error);
@@ -2385,16 +2874,6 @@ export function MonitoringPage() {
     });
   };
 
-  const hasFaceBox = isStreaming ? trackedFaceBox !== null : recognitionResult?.face_box != null;
-  const isRecognitionPending =
-    hasFaceBox &&
-    (recognitionResult === null || recognitionResult.status === 'no_face') &&
-    isRecognizing;
-  const hasRecognitionFaceOverlay = overlayTracks.some((overlay) => overlay.id.startsWith('face-recognition'));
-  const localFaceBoxStyle =
-    isStreaming && trackedFaceBox && !hasRecognitionFaceOverlay
-      ? getLocalFaceBoxStyle(trackedFaceBox, videoRef.current)
-      : null;
   const criticalAlerts = useMemo(
     () => alerts.filter((alert) => getAlertGroup(alert) === 'critical'),
     [alerts],
@@ -2571,6 +3050,13 @@ export function MonitoringPage() {
                     }`}
                   />
 
+                  {/* Single canvas for ALL detection overlays — cleared and redrawn
+                      every frame, so no per-box DOM layers can leave frozen ghosts. */}
+                  <canvas
+                    ref={overlayCanvasRef}
+                    className="absolute inset-0 h-full w-full pointer-events-none"
+                  />
+
                   <div className="absolute top-4 left-4 bg-red-600 px-3 py-1 rounded flex items-center gap-2">
                     <div className="w-2 h-2 bg-white rounded-full animate-pulse"></div>
                     <span className="text-white text-sm font-semibold">{isStreaming ? 'LIVE' : 'OFFLINE'}</span>
@@ -2588,50 +3074,6 @@ export function MonitoringPage() {
                             ? 'The browser opened your camera. Waiting for the live video frames to appear.'
                             : cameraMessage}
                         </p>
-                      </div>
-                    </div>
-                  )}
-
-                  {isStreaming && hasLiveVideo && overlayTracks.map((overlay) => {
-                    const overlayStyle = getOverlayStyle(overlay, videoRef.current);
-                    if (!overlayStyle) {
-                      return null;
-                    }
-
-                    return (
-                      <div key={overlay.trackId} className="absolute inset-0 pointer-events-none">
-                        <div
-                          className="absolute rounded-sm border-[3px]"
-                          style={{
-                            ...overlayStyle,
-                            borderColor: overlay.borderColor,
-                            transition: 'none',
-                            willChange: 'left, top, width, height',
-                          }}
-                        >
-                          <div
-                            className="absolute left-0 -top-3 -translate-y-full px-3 py-1 rounded-full text-sm font-semibold text-white whitespace-nowrap"
-                            style={{ backgroundColor: overlay.badgeColor }}
-                          >
-                            {overlay.label}
-                            {typeof overlay.confidence === 'number'
-                              ? ` ${(overlay.confidence * 100).toFixed(0)}%`
-                              : ''}
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-
-                  {isStreaming && hasLiveVideo && localFaceBoxStyle && (
-                    <div className="absolute inset-0 pointer-events-none">
-                      <div
-                        className="absolute rounded-sm border-[3px] border-[#f59e0b]"
-                        style={localFaceBoxStyle}
-                      >
-                        <div className="absolute left-0 -top-3 -translate-y-full rounded-full bg-[#b45309] px-3 py-1 text-sm font-semibold whitespace-nowrap text-white">
-                          Face detected
-                        </div>
                       </div>
                     </div>
                   )}
