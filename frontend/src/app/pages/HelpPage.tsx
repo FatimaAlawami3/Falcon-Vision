@@ -11,7 +11,7 @@ export function HelpPage() {
   const user = getAuthUser();
   const homePath = user ? getHomePathForRole(user.role) : '/';
 
-  const supportEmail = import.meta.env.VITE_SUPPORT_EMAIL?.trim() || 'support@falcon-vision.site';
+  const supportEmail = import.meta.env.VITE_SUPPORT_EMAIL?.trim() || 'falcon.vision.support@gmail.com';
   const contactHref = `mailto:${supportEmail}?subject=${encodeURIComponent('Falcon Vision support')}`;
 
   const faqs = [
