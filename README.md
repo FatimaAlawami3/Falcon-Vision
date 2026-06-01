@@ -1,128 +1,181 @@
 # Falcon Vision
 
-AI-powered industrial safety monitoring system that combines computer vision, face recognition, and LLM-assisted regulation extraction.
+Falcon Vision is a senior project that uses artificial intelligence to support industrial safety monitoring. The system combines computer vision, face recognition, and regulation analysis to help organizations detect safety violations in real time.
 
-Falcon Vision lets an organization upload its own safety regulation PDF, extract monitorable rules from it, choose which rules are active, and then run live monitoring for PPE compliance, fall detection, fire/smoke detection, face-based access control, and alert history.
+The main idea of the project is to allow each organization to upload its own safety regulation document. The system extracts useful safety rules from the document and uses them during monitoring, instead of relying only on fixed rules.
 
-## Table of Contents
+## Project Idea
 
-- [Project Overview](#project-overview)
-- [Main Features](#main-features)
-- [Tech Stack](#tech-stack)
-- [Repository Structure](#repository-structure)
-- [System Architecture](#system-architecture)
-- [AI Modules](#ai-modules)
-- [User Roles](#user-roles)
-- [Main Workflows](#main-workflows)
-- [API Overview](#api-overview)
-- [Model Assets](#model-assets)
+Industrial workplaces can include many safety risks, such as missing personal protective equipment, falls, fire or smoke, and unauthorized access to restricted areas. Manual monitoring can be difficult because supervisors may not be able to observe every area continuously.
 
-## Project Overview
+Falcon Vision aims to support supervisors by analyzing camera frames and detecting possible safety violations automatically. The system also connects the monitoring process with company-specific safety regulations, so the detection results are related to the rules selected by the organization.
 
-Falcon Vision is built for industrial safety monitoring. The system supports company-specific rules instead of hard-coded safety assumptions:
+## Problem Statement
 
-1. An admin registers an organization.
-2. The admin uploads a safety regulation PDF.
-3. The backend extracts safety requirements from the PDF.
-4. Extracted rules are mapped to available vision modules.
-5. The admin activates the rules/modules that should be monitored.
-6. Supervisors run live monitoring from the dashboard.
-7. The system detects violations and stores alerts with evidence images.
+Many industrial safety systems detect only predefined hazards. However, safety requirements can differ from one company to another depending on the work environment, equipment, and internal regulations. This creates a need for a flexible monitoring system that can understand uploaded safety documents and apply the extracted requirements during monitoring.
 
-The project includes:
+Falcon Vision addresses this problem by combining:
 
-- A FastAPI backend with MongoDB persistence.
-- A Vite/React frontend dashboard.
-- YOLO-based PPE detection.
-- YOLO pose + Random Forest fall detection.
-- Fire/smoke detection with optional sensor fusion.
-- Face recognition using RetinaFace/ArcFace-style ONNX models.
-- LLM/local keyword rule extraction for regulation PDFs.
+- Regulation rule extraction.
+- PPE compliance detection.
+- Fall detection.
+- Fire and smoke detection.
+- Face recognition for access control.
+- A dashboard for admins and supervisors.
+
+## Project Objectives
+
+The objectives of Falcon Vision are:
+
+- To build an AI-powered monitoring system for industrial safety.
+- To extract safety rules from uploaded regulation PDF files.
+- To detect PPE violations based on the active regulation.
+- To detect falls in monitored areas.
+- To detect fire and smoke hazards.
+- To recognize employee faces for access-control monitoring.
+- To generate and store safety alerts with evidence.
+- To provide separate dashboards for admins and supervisors.
+
+## System Overview
+
+Falcon Vision is a web-based system with two main parts:
+
+- Frontend dashboard: used by admins and supervisors to manage the system and view monitoring results.
+- Backend API: handles authentication, database operations, regulation extraction, AI model calls, and alert management.
+
+The system stores organization data, users, employees, regulations, extracted rules, face images, monitoring reports, and alerts in MongoDB.
 
 ## Main Features
 
-### Authentication and Accounts
+### Authentication
 
-- Organization registration.
-- Admin and supervisor roles.
-- JWT-based login.
+- Organization sign up.
+- Login for admins and supervisors.
 - Password reset.
-- Shared password strength requirements across sign up, reset password, profile updates, and supervisor account creation.
-- Password visibility toggle for password fields.
+- Profile update.
+- Strong password requirements.
+- Password show/hide option.
 
-Password requirements:
+### Regulation Management
 
-- At least 8 characters.
-- Contains uppercase letter.
-- Contains lowercase letter.
-- Contains number.
-- Contains symbol.
+- Admins can upload safety regulation PDF files.
+- The system extracts safety rules from the uploaded document.
+- Admins can activate or deactivate extracted rules.
+- Admins can enable monitoring modules manually if needed.
+- The active regulation controls what the system monitors.
 
-### Admin Dashboard
+### Employee Management
 
-- Upload regulation PDFs.
-- Extract safety rules from PDF files.
-- View saved regulations.
-- Switch active regulation.
-- Download or delete regulation PDFs.
-- Enable/disable extracted rules.
-- Enable manual modules when the PDF does not explicitly contain them.
-- Manage employees.
-- Upload employee face images.
-- Create, edit, suspend, or delete supervisor accounts.
-- View and clear alert history.
+- Admins can add, edit, and delete employee records.
+- Employee information includes ID, name, department, job title, phone, email, and PPE requirements.
+- Employee records are used with face recognition and monitoring workflows.
 
-### Supervisor Dashboard
+### Face Recognition Management
 
-- Start live monitoring.
-- View live camera feed.
-- See bounding boxes and labels over video frames.
-- Receive live alerts for:
-  - Missing PPE.
-  - Falls.
-  - Fire/smoke.
-  - Unauthorized or unknown faces.
-- Save monitoring session reports.
-- View alert history.
-- Update own profile.
+- Admins can upload employee face images.
+- The system uses uploaded images as the employee face gallery.
+- During monitoring, detected faces can be compared with stored employee faces.
+- Unknown or unauthorized faces can generate alerts when face recognition is enabled.
 
-### Regulation Extraction
+### Live Monitoring
 
-- Upload PDF regulations.
-- Extract PPE requirements.
-- Extract fall monitoring requirements.
-- Extract fire/smoke/heat monitoring requirements.
-- Extract face recognition/access control requirements.
-- Uses Hugging Face router/OpenAI-compatible API when `HF_TOKEN` is configured.
-- Falls back to local keyword extraction when the external LLM is unavailable.
+Supervisors can use the monitoring page to analyze live camera frames. The system can detect:
 
-### Alerts
+- Missing PPE.
+- Falls.
+- Fire or smoke.
+- Unknown or unauthorized faces.
 
-- Saves alerts per organization.
-- Stores alert category, severity, status, time, zone, employee snapshot, and cropped evidence image.
-- De-duplicates repeated alerts within a short time window.
-- Supports alert history clearing and single-alert deletion.
+The frontend displays detection boxes and alert information during monitoring.
 
-## Tech Stack
+### Alert History
 
-### Backend
+- Alerts are stored for each organization.
+- Alerts include category, severity, time, zone, message, and evidence image when available.
+- Admins and supervisors can view alert history.
+- Admins can clear or delete alerts.
 
-- Python 3.11
-- FastAPI
-- Uvicorn
-- Motor / PyMongo
-- MongoDB
-- Pydantic v2
-- JWT authentication with `python-jose`
-- Password hashing with `passlib` and `bcrypt`
-- OpenCV
-- NumPy
-- Ultralytics YOLO
-- ONNX Runtime
-- scikit-learn
-- Docling / PyPDF2
-- OpenAI Python SDK for Hugging Face router integration
-- Azure Blob Storage support
+### Monitoring Reports
+
+Supervisors can save a monitoring session report that summarizes:
+
+- Session time.
+- Zone.
+- Number of alerts.
+- Alert categories.
+- Active monitoring modules.
+- Whether face recognition was enabled.
+
+## AI Components
+
+### PPE Detection
+
+The PPE module detects safety equipment and missing equipment. It supports items such as helmets, gloves, masks, safety vests, safety shoes, safety glasses, face shields, coveralls, ear protectors, and safety harnesses.
+
+The system compares the detected PPE results with the PPE rules extracted from the active regulation.
+
+### Fall Detection
+
+The fall detection module analyzes people in camera frames and classifies whether a person appears to have fallen. This module supports supervisors by generating alerts when a fall is detected in a monitored area.
+
+### Fire and Smoke Detection
+
+The fire detection module identifies fire and smoke in camera frames. It can also support multimodal detection when sensor data is provided.
+
+### Face Recognition
+
+The face recognition module compares detected faces with uploaded employee face images. It is used for access-control related monitoring, such as detecting unknown or unauthorized people.
+
+### Regulation Rule Extraction
+
+The regulation extraction module reads uploaded PDF documents and extracts safety requirements. These requirements are converted into system rules that can be used by the monitoring modules.
+
+The extracted rules can include:
+
+- Required PPE items.
+- Fall-related monitoring rules.
+- Fire or smoke monitoring rules.
+- Face recognition or access-control rules.
+
+## User Roles
+
+### Admin
+
+The admin is responsible for setting up and managing the organization inside the system. Admin features include:
+
+- Uploading regulation files.
+- Extracting and selecting safety rules.
+- Managing employees.
+- Uploading employee face images.
+- Managing supervisor accounts.
+- Viewing and clearing alert history.
+
+### Supervisor
+
+The supervisor is responsible for monitoring safety conditions. Supervisor features include:
+
+- Running live monitoring.
+- Viewing real-time alerts.
+- Viewing alert history.
+- Saving monitoring session reports.
+- Updating profile information.
+
+## System Workflow
+
+The general workflow of the system is:
+
+1. The admin creates an organization account.
+2. The admin uploads a safety regulation PDF.
+3. The system extracts safety rules from the PDF.
+4. The admin selects the rules and modules that should be active.
+5. The admin adds employees and uploads employee face images.
+6. The supervisor starts monitoring.
+7. Camera frames are analyzed by the AI modules.
+8. Safety violations are shown on the dashboard.
+9. Alerts are saved in the alert history.
+10. The supervisor can save a monitoring report.
+
+## Technologies Used
 
 ### Frontend
 
@@ -131,281 +184,46 @@ Password requirements:
 - Vite
 - React Router
 - Tailwind CSS
-- Radix UI components
-- Lucide React icons
-- Sonner toast notifications
+- Radix UI
+- Lucide icons
 
-### Infrastructure
+### Backend
 
-- Docker and Docker Compose for backend deployment.
-- Vercel-compatible frontend rewrites.
-- MongoDB database.
-- Local filesystem or Azure Blob Storage for uploads/evidence files.
+- Python
+- FastAPI
+- MongoDB
+- Motor / PyMongo
+- Pydantic
+- JWT authentication
+- OpenCV
+- NumPy
+- Ultralytics YOLO
+- ONNX Runtime
+- scikit-learn
 
-## Repository Structure
+### AI and Document Processing
+
+- YOLO models for object detection.
+- Pose-based fall detection.
+- Face detection and recognition.
+- PDF text extraction.
+- LLM-assisted rule extraction with local fallback.
+
+## Repository Overview
 
 ```text
 Falcon-Vision/
-  backend/
-    app/
-      api/                 FastAPI route definitions and dependencies
-      core/                configuration, security, database, constants, validation
-      integrations/        AI, storage, and notification clients
-      models/              Mongo/Pydantic domain models
-      repositories/        MongoDB data access layer
-      schemas/             request/response schemas
-      services/            business logic
-      utils/               shared helpers
-      main.py              FastAPI app entry point
-    postman/               Postman API collection
-    scripts/               database/setup helper scripts
-    tests/                 test package placeholders
-    Dockerfile             backend Docker image
-    requirements.txt       Python dependencies
-
-  frontend/
-    src/
-      app/
-        components/        shared React components
-        lib/               API/auth/password helpers
-        pages/             public, admin, and supervisor pages
-      assets/              images and logo
-      styles/              CSS/theme files
-    package.json
-    vite.config.ts
-    vercel.json
-
-  PPE/                     PPE YOLO model and prototype notebook
-  Fall model/              fall pose model, RF classifier, notebook
-  Fire Detection/          fire/smoke prototype notebooks and ML artifacts
-  Face Recognition/        face recognition prototype notebook
-  LLM/                     LLM prototype notebook
-  docker-compose.yml
-  README.md
-  vercel.json
+  backend/              Backend API, services, schemas, repositories, and AI integrations
+  frontend/             React web dashboard
+  PPE/                  PPE detection model and notebook
+  Fall model/           Fall detection model and notebook
+  Fire Detection/       Fire detection notebooks and related files
+  Face Recognition/     Face recognition notebook
+  LLM/                  Regulation extraction notebook
 ```
 
-## System Architecture
+## Project Status
 
-```text
-React frontend
-  |
-  | REST / WebSocket / WebRTC-style monitoring requests
-  v
-FastAPI backend
-  |
-  | routes
-  v
-Services
-  |
-  | repositories              | integrations
-  v                           v
-MongoDB                    AI models / storage / LLM
-```
+Falcon Vision currently includes the main implementation of the web dashboard, backend API, AI detection modules, regulation extraction workflow, employee management, face upload workflow, live monitoring, alert history, and monitoring reports.
 
-Backend responsibilities are separated by layer:
-
-- Routes receive HTTP/WebSocket requests.
-- Schemas validate request and response shapes.
-- Services contain business logic.
-- Repositories handle MongoDB access.
-- Integrations wrap model inference, file storage, and external providers.
-
-## AI Modules
-
-### PPE Detection
-
-Path:
-
-```text
-PPE/PPE_model.pt
-```
-
-The PPE service uses the YOLO model to detect PPE and missing-PPE classes. Live monitoring filters detections based on the active regulation rules, so the system only alerts for PPE that is required by the uploaded regulation.
-
-Supported classes include:
-
-- Coverall
-- Ear Protectors
-- Face Shield
-- Gloves
-- Helmet
-- Mask
-- Safety Glasses
-- Safety Harness
-- Safety Shoes
-- Safety Vest
-- Corresponding `No ...` violation classes
-
-### Fall Detection
-
-Paths:
-
-```text
-Fall model/fall_model.pt
-Fall model/fall_classifier_RF.pkl
-```
-
-The fall pipeline uses a pose model and a Random Forest classifier. Detection is activated when the active regulation contains a fall-related rule or the admin manually enables fall monitoring.
-
-### Fire and Smoke Detection
-
-Main backend model path:
-
-```text
-backend/app/integrations/ai/fire_detection/best.pt
-```
-
-Prototype and ML artifacts:
-
-```text
-Fire Detection/
-```
-
-The service supports image-only detection and optional multimodal fusion with sensor data. Fire detection can be disabled with `FIRE_DETECTION_ENABLED=false`.
-
-### Face Recognition
-
-Face images are uploaded per employee. Recognition is enabled only when an active access-control rule exists, usually through extracted or manually enabled face recognition rules.
-
-The face recognition client downloads/caches required ONNX models from InsightFace release assets when needed. In Docker, the cache is persisted through the `insightface_cache` volume.
-
-### Regulation Rule Extraction
-
-The regulation extractor:
-
-- Reads text directly from PDFs with PyPDF2 when possible.
-- Uses Docling/OCR fallback for pages with weak text extraction.
-- Uses an LLM when `HF_TOKEN` is configured.
-- Falls back to local keyword extraction when no token is configured or the provider fails.
-
-Extracted rule categories:
-
-- PPE
-- Fall
-- Fire/smoke
-- Access control / face recognition
-
-## User Roles
-
-### Admin
-
-Admins can:
-
-- Register an organization.
-- Upload and manage regulation PDFs.
-- Extract and select monitoring rules.
-- Manage employees.
-- Upload employee face images.
-- Manage supervisor accounts.
-- View monitoring and alert history.
-
-### Supervisor
-
-Supervisors can:
-
-- Run monitoring sessions.
-- View live safety results.
-- Save session reports.
-- View alert history.
-- Update their own profile.
-
-## Main Workflows
-
-### Organization Registration
-
-1. User opens Sign Up.
-2. Creates an organization and admin account.
-3. Backend creates:
-   - Organization document.
-   - Admin user document.
-4. Admin logs in and lands on the admin dashboard.
-
-### Regulation Upload and Extraction
-
-1. Admin uploads a PDF regulation.
-2. Backend stores the PDF.
-3. Admin starts extraction.
-4. Backend extracts rules from the PDF.
-5. Rules are saved under the active regulation.
-6. Admin selects active PPE items and monitoring modules.
-7. Monitoring uses only active rules.
-
-### Employee and Face Setup
-
-1. Admin creates employee records.
-2. Admin uploads employee face images.
-3. Images are stored.
-4. Embeddings are created lazily during recognition if missing.
-5. Face recognition compares live faces against the employee gallery.
-
-### Live Monitoring
-
-1. Supervisor opens Monitoring.
-2. Browser captures frames from camera video.
-3. Frames are sent to the backend through the monitoring endpoint/socket.
-4. Backend runs enabled modules:
-   - PPE
-   - Fall
-   - Fire/smoke
-5. Frontend draws overlays and shows alerts.
-6. Backend stores alert evidence when a violation is created.
-
-### Alert History
-
-1. Alerts are listed by organization.
-2. Admin/supervisor can view alert history.
-3. Admin can clear/delete alert history.
-4. Alert evidence files are deleted when alert documents are removed.
-
-## API Overview
-
-Swagger UI:
-
-```text
-http://127.0.0.1:8000/docs
-```
-
-Main route groups:
-
-| Area | Prefix | Purpose |
-| --- | --- | --- |
-| Health | `/api/health` | Backend health check |
-| Auth | `/api/auth` | Register, login, reset password, current user |
-| Users | `/api/users` | Admin/supervisor user management |
-| Employees | `/api/employees` | Employee directory |
-| Employee Faces | `/api/employee-faces` | Face upload and recognition |
-| Regulations | `/api/regulations` | PDF upload, extraction, rules, modules |
-| PPE | `/api/ppe` | PPE detection and compliance |
-| Fall | `/api/fall` | Fall detection |
-| Fire | `/api/fire` | Fire/smoke detection |
-| Monitoring | `/api/monitoring` | Live combined safety detection |
-| Monitoring Sessions | `/api/monitoring-sessions` | Save monitoring reports |
-| Alerts | `/api/alerts` | Alert history |
-
-Postman collection:
-
-```text
-backend/postman/FalconVision.postman_collection.json
-```
-
-## Model Assets
-
-The project expects model files to remain in these paths:
-
-```text
-PPE/PPE_model.pt
-Fall model/fall_model.pt
-Fall model/fall_classifier_RF.pkl
-backend/app/integrations/ai/fire_detection/best.pt
-Fire Detection/ml_lr_classifier.pkl
-Fire Detection/ml_lrـscaler.pkl
-Fire Detection/ml_lrـlabel_encoder.pkl
-```
-
-Notes:
-
-- Some fire sensor ML files are prototype artifacts and may be optional depending on the path used by the backend.
-- The face recognition client downloads/caches InsightFace ONNX files when needed.
-- Large model files should be treated carefully when cloning, deploying, or moving the project.
-
+The project was developed as a senior project to demonstrate how artificial intelligence can be used to improve industrial safety monitoring and make safety systems more adaptable to organization-specific regulations.
