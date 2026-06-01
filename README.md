@@ -1,6 +1,6 @@
 # Falcon Vision
 
-Falcon Vision is a senior project that uses artificial intelligence to support industrial safety monitoring. The system combines computer vision, face recognition, and regulation analysis to help organizations detect safety violations in real time.
+Falcon Vision is an artificial intelligence system designed to support industrial safety monitoring. The system combines computer vision, face recognition, and regulation analysis to help organizations detect safety violations in real time.
 
 The main idea of the project is to allow each organization to upload its own safety regulation document. The system extracts useful safety rules from the document and uses them during monitoring, instead of relying only on fixed rules.
 
@@ -226,4 +226,4 @@ Falcon-Vision/
 
 Falcon Vision currently includes the main implementation of the web dashboard, backend API, AI detection modules, regulation extraction workflow, employee management, face upload workflow, live monitoring, alert history, and monitoring reports.
 
-The project was developed as a senior project to demonstrate how artificial intelligence can be used to improve industrial safety monitoring and make safety systems more adaptable to organization-specific regulations.
+The project demonstrates how artificial intelligence can be used to improve industrial safety monitoring and make safety systems more adaptable to organization-specific regulations.
