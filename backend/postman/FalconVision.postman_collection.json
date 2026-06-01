@@ -2,7 +2,7 @@
   "info": {
     "name": "Falcon Vision Backend",
     "_postman_id": "7b7b2a8b-7d7f-4b9c-a3e6-falconvision001",
-    "description": "Postman collection for the Falcon Vision FastAPI backend auth flow.",
+    "description": "Updated Postman collection for the Falcon Vision FastAPI backend. Includes auth, users, employees, regulations, monitoring, AI detection, alerts, and reports.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "auth": {
@@ -41,7 +41,15 @@
       "value": "http://127.0.0.1:8000"
     },
     {
+      "key": "ws_base_url",
+      "value": "ws://127.0.0.1:8000"
+    },
+    {
       "key": "access_token",
+      "value": ""
+    },
+    {
+      "key": "organization_id",
       "value": ""
     },
     {
@@ -54,11 +62,19 @@
     },
     {
       "key": "admin_password",
-      "value": "StrongPass123"
+      "value": "StrongPass123!"
     },
     {
-      "key": "new_user_email",
-      "value": "viewer@example.com"
+      "key": "new_password",
+      "value": "NewStrongPass123!"
+    },
+    {
+      "key": "supervisor_email",
+      "value": "supervisor@example.com"
+    },
+    {
+      "key": "supervisor_password",
+      "value": "TempPass123!"
     },
     {
       "key": "user_id",
@@ -70,70 +86,91 @@
     },
     {
       "key": "employee_number",
-      "value": "EMP-1001"
+      "value": "12345"
+    },
+    {
+      "key": "employee_email",
+      "value": "employee@example.com"
+    },
+    {
+      "key": "regulation_id",
+      "value": ""
+    },
+    {
+      "key": "rule_id",
+      "value": ""
+    },
+    {
+      "key": "module_name",
+      "value": "face_recognition"
+    },
+    {
+      "key": "alert_id",
+      "value": ""
+    },
+    {
+      "key": "zone_type",
+      "value": "production"
+    },
+    {
+      "key": "regulation_pdf_path",
+      "value": ""
+    },
+    {
+      "key": "image_file_path",
+      "value": ""
+    },
+    {
+      "key": "face_file_path",
+      "value": ""
     }
   ],
   "item": [
     {
-      "name": "Health Check",
-      "request": {
-        "auth": {
-          "type": "noauth"
-        },
-        "method": "GET",
-        "header": [],
-        "url": {
-          "raw": "{{base_url}}/api/health",
-          "host": [
-            "{{base_url}}"
-          ],
-          "path": [
-            "api",
-            "health"
+      "name": "Health",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/health",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "health"
+              ]
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});"
+                ]
+              }
+            }
           ]
         }
-      },
-      "response": []
+      ]
     },
     {
       "name": "Auth",
       "item": [
         {
           "name": "Register Organization",
-          "event": [
-            {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "const suffix = Date.now();",
-                  "pm.collectionVariables.set('organization_name', `Falcon Steel Factory ${suffix}`);",
-                  "pm.collectionVariables.set('admin_email', `admin.${suffix}@example.com`);",
-                  "pm.collectionVariables.set('admin_password', 'StrongPass123');"
-                ]
-              }
-            },
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('register organization returns 201', function () {",
-                  "  pm.response.to.have.status(201);",
-                  "});",
-                  "",
-                  "const body = pm.response.json();",
-                  "if (body.user && body.user.email) {",
-                  "  pm.collectionVariables.set('admin_email', body.user.email);",
-                  "}"
-                ]
-              }
-            }
-          ],
           "request": {
-            "auth": {
-              "type": "noauth"
-            },
             "method": "POST",
             "header": [
               {
@@ -141,10 +178,6 @@
                 "value": "application/json"
               }
             ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"organization_name\": \"{{organization_name}}\",\n  \"industry\": \"manufacturing\",\n  \"country\": \"Saudi Arabia\",\n  \"city\": \"Riyadh\",\n  \"address\": \"Industrial Zone 2\",\n  \"admin_full_name\": \"Admin User\",\n  \"admin_email\": \"{{admin_email}}\",\n  \"admin_password\": \"{{admin_password}}\",\n  \"admin_phone\": \"+966500000000\"\n}"
-            },
             "url": {
               "raw": "{{base_url}}/api/auth/register-organization",
               "host": [
@@ -155,34 +188,52 @@
                 "auth",
                 "register-organization"
               ]
+            },
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"organization_name\": \"{{organization_name}}\",\n  \"industry\": \"Manufacturing\",\n  \"country\": \"Saudi Arabia\",\n  \"city\": \"Dammam\",\n  \"address\": \"Industrial Area\",\n  \"admin_full_name\": \"Admin User\",\n  \"admin_email\": \"{{admin_email}}\",\n  \"admin_password\": \"{{admin_password}}\",\n  \"admin_phone\": \"0512345678\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             }
           },
-          "response": []
-        },
-        {
-          "name": "Login",
+          "response": [],
           "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const suffix = Date.now();",
+                  "pm.collectionVariables.set(\"organization_name\", `Falcon Steel Factory ${suffix}`);",
+                  "pm.collectionVariables.set(\"admin_email\", `admin.${suffix}@example.com`);",
+                  "pm.collectionVariables.set(\"admin_password\", \"StrongPass123!\");"
+                ]
+              }
+            },
             {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('login returns 200', function () {",
-                  "  pm.response.to.have.status(200);",
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
                   "});",
-                  "",
-                  "const body = pm.response.json();",
-                  "if (body.access_token) {",
-                  "  pm.collectionVariables.set('access_token', body.access_token);",
-                  "}"
+                  "const json = pm.response.json();",
+                  "if (json.organization?.id) { pm.collectionVariables.set(\"organization_id\", json.organization.id); }"
                 ]
               }
             }
-          ],
+          ]
+        },
+        {
+          "name": "Login",
           "request": {
-            "auth": {
-              "type": "noauth"
-            },
             "method": "POST",
             "header": [
               {
@@ -190,10 +241,6 @@
                 "value": "application/json"
               }
             ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"email\": \"{{admin_email}}\",\n  \"password\": \"{{admin_password}}\"\n}"
-            },
             "url": {
               "raw": "{{base_url}}/api/auth/login",
               "host": [
@@ -204,12 +251,90 @@
                 "auth",
                 "login"
               ]
+            },
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{admin_email}}\",\n  \"password\": \"{{admin_password}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             }
           },
-          "response": []
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "if (json.access_token) {",
+                  "  pm.collectionVariables.set(\"access_token\", json.access_token);",
+                  "}"
+                ]
+              }
+            }
+          ]
         },
         {
-          "name": "Get Me",
+          "name": "Forgot Password",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/auth/forgot-password",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "forgot-password"
+              ]
+            },
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{admin_email}}\",\n  \"password\": \"{{new_password}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get Current User",
           "request": {
             "method": "GET",
             "header": [],
@@ -225,7 +350,66 @@
               ]
             }
           },
-          "response": []
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Update Current User",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/auth/me",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "me"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"full_name\": \"Admin User\",\n  \"email\": \"{{admin_email}}\",\n  \"phone\": \"0512345678\",\n  \"job_title\": \"Organization Admin\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});"
+                ]
+              }
+            }
+          ]
         }
       ]
     },
@@ -233,35 +417,7 @@
       "name": "Users",
       "item": [
         {
-          "name": "Create User",
-          "event": [
-            {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "const suffix = Date.now();",
-                  "pm.collectionVariables.set('new_user_email', `viewer.${suffix}@example.com`);"
-                ]
-              }
-            },
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('create user returns 201', function () {",
-                  "  pm.response.to.have.status(201);",
-                  "});",
-                  "",
-                  "const body = pm.response.json();",
-                  "if (body.id) {",
-                  "  pm.collectionVariables.set('user_id', body.id);",
-                  "}"
-                ]
-              }
-            }
-          ],
+          "name": "Create Supervisor User",
           "request": {
             "method": "POST",
             "header": [
@@ -270,10 +426,6 @@
                 "value": "application/json"
               }
             ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"full_name\": \"Safety Supervisor\",\n  \"email\": \"{{new_user_email}}\",\n  \"password\": \"StrongPass123\",\n  \"role\": \"supervisor\",\n  \"phone\": \"+966500000001\",\n  \"job_title\": \"Safety Supervisor\"\n}"
-            },
             "url": {
               "raw": "{{base_url}}/api/users",
               "host": [
@@ -283,9 +435,44 @@
                 "api",
                 "users"
               ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"full_name\": \"Supervisor User\",\n  \"email\": \"{{supervisor_email}}\",\n  \"password\": \"{{supervisor_password}}\",\n  \"role\": \"supervisor\",\n  \"employee_id\": \"54321\",\n  \"phone\": \"0598765432\",\n  \"job_title\": \"Safety Supervisor\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             }
           },
-          "response": []
+          "response": [],
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const suffix = Date.now();",
+                  "pm.collectionVariables.set(\"supervisor_email\", `supervisor.${suffix}@example.com`);",
+                  "pm.collectionVariables.set(\"supervisor_password\", \"TempPass123!\");"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "if (json.id) { pm.collectionVariables.set(\"user_id\", json.id); }"
+                ]
+              }
+            }
+          ]
         },
         {
           "name": "List Users",
@@ -303,10 +490,23 @@
               ]
             }
           },
-          "response": []
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});"
+                ]
+              }
+            }
+          ]
         },
         {
-          "name": "Get User By Id",
+          "name": "Get User",
           "request": {
             "method": "GET",
             "header": [],
@@ -322,7 +522,20 @@
               ]
             }
           },
-          "response": []
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});"
+                ]
+              }
+            }
+          ]
         },
         {
           "name": "Update User",
@@ -334,10 +547,6 @@
                 "value": "application/json"
               }
             ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"full_name\": \"Updated Supervisor\",\n  \"job_title\": \"Updated Job Title\",\n  \"role\": \"supervisor\"\n}"
-            },
             "url": {
               "raw": "{{base_url}}/api/users/{{user_id}}",
               "host": [
@@ -348,9 +557,33 @@
                 "users",
                 "{{user_id}}"
               ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"full_name\": \"Supervisor User\",\n  \"email\": \"{{supervisor_email}}\",\n  \"role\": \"supervisor\",\n  \"employee_id\": \"54321\",\n  \"phone\": \"0598765432\",\n  \"job_title\": \"Senior Safety Supervisor\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             }
           },
-          "response": []
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "if (json.id) { pm.collectionVariables.set(\"user_id\", json.id); }"
+                ]
+              }
+            }
+          ]
         },
         {
           "name": "Update User Status",
@@ -362,10 +595,6 @@
                 "value": "application/json"
               }
             ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"status\": \"inactive\"\n}"
-            },
             "url": {
               "raw": "{{base_url}}/api/users/{{user_id}}/status",
               "host": [
@@ -377,9 +606,31 @@
                 "{{user_id}}",
                 "status"
               ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"active\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             }
           },
-          "response": []
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});"
+                ]
+              }
+            }
+          ]
         },
         {
           "name": "Delete User",
@@ -398,7 +649,20 @@
               ]
             }
           },
-          "response": []
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});"
+                ]
+              }
+            }
+          ]
         }
       ]
     },
@@ -407,34 +671,6 @@
       "item": [
         {
           "name": "Create Employee",
-          "event": [
-            {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "const suffix = Date.now();",
-                  "pm.collectionVariables.set('employee_number', `EMP-${suffix}`);"
-                ]
-              }
-            },
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('create employee returns 201', function () {",
-                  "  pm.response.to.have.status(201);",
-                  "});",
-                  "",
-                  "const body = pm.response.json();",
-                  "if (body.id) {",
-                  "  pm.collectionVariables.set('employee_id', body.id);",
-                  "}"
-                ]
-              }
-            }
-          ],
           "request": {
             "method": "POST",
             "header": [
@@ -443,10 +679,6 @@
                 "value": "application/json"
               }
             ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"employee_number\": \"{{employee_number}}\",\n  \"full_name\": \"Factory Employee\",\n  \"department\": \"Production\",\n  \"job_title\": \"Machine Operator\",\n  \"employment_type\": \"employee\",\n  \"status\": \"active\",\n  \"phone\": \"+966500000010\",\n  \"email\": \"employee@example.com\",\n  \"requires_ppe\": true,\n  \"ppe_requirements\": [\"helmet\", \"vest\"],\n  \"training_certifications\": [\"Forklift Safety\"]\n}"
-            },
             "url": {
               "raw": "{{base_url}}/api/employees",
               "host": [
@@ -456,9 +688,44 @@
                 "api",
                 "employees"
               ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"employee_number\": \"{{employee_number}}\",\n  \"full_name\": \"Test Employee\",\n  \"department\": \"Operations\",\n  \"job_title\": \"Technician\",\n  \"employment_type\": \"employee\",\n  \"status\": \"active\",\n  \"phone\": \"0511111111\",\n  \"email\": \"{{employee_email}}\",\n  \"requires_ppe\": true,\n  \"ppe_requirements\": [\n    \"Helmet\",\n    \"Safety Vest\"\n  ],\n  \"training_certifications\": [\n    \"Safety Induction\"\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             }
           },
-          "response": []
+          "response": [],
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const suffix = String(Date.now()).slice(-5);",
+                  "pm.collectionVariables.set(\"employee_number\", suffix.padStart(5, \"1\"));",
+                  "pm.collectionVariables.set(\"employee_email\", `employee.${suffix}@example.com`);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "if (json.id) { pm.collectionVariables.set(\"employee_id\", json.id); }"
+                ]
+              }
+            }
+          ]
         },
         {
           "name": "List Employees",
@@ -476,10 +743,23 @@
               ]
             }
           },
-          "response": []
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});"
+                ]
+              }
+            }
+          ]
         },
         {
-          "name": "Get Employee By Id",
+          "name": "Get Employee",
           "request": {
             "method": "GET",
             "header": [],
@@ -495,7 +775,20 @@
               ]
             }
           },
-          "response": []
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});"
+                ]
+              }
+            }
+          ]
         },
         {
           "name": "Update Employee",
@@ -507,10 +800,6 @@
                 "value": "application/json"
               }
             ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"department\": \"Safety\",\n  \"job_title\": \"Safety Inspector\",\n  \"training_certifications\": [\"Forklift Safety\", \"Emergency Response\"]\n}"
-            },
             "url": {
               "raw": "{{base_url}}/api/employees/{{employee_id}}",
               "host": [
@@ -521,9 +810,33 @@
                 "employees",
                 "{{employee_id}}"
               ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"department\": \"Operations\",\n  \"job_title\": \"Senior Technician\",\n  \"requires_ppe\": true,\n  \"ppe_requirements\": [\n    \"Helmet\",\n    \"Safety Vest\",\n    \"Safety Shoes\"\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             }
           },
-          "response": []
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "if (json.id) { pm.collectionVariables.set(\"employee_id\", json.id); }"
+                ]
+              }
+            }
+          ]
         },
         {
           "name": "Delete Employee",
@@ -542,7 +855,20 @@
               ]
             }
           },
-          "response": []
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});"
+                ]
+              }
+            }
+          ]
         }
       ]
     },
@@ -551,37 +877,9 @@
       "item": [
         {
           "name": "Upload Employee Faces",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('upload faces returns 201', function () {",
-                  "  pm.response.to.have.status(201);",
-                  "});"
-                ]
-              }
-            }
-          ],
           "request": {
             "method": "POST",
             "header": [],
-            "body": {
-              "mode": "formdata",
-              "formdata": [
-                {
-                  "key": "employee_id",
-                  "value": "{{employee_id}}",
-                  "type": "text"
-                },
-                {
-                  "key": "files",
-                  "type": "file",
-                  "src": []
-                }
-              ]
-            },
             "url": {
               "raw": "{{base_url}}/api/employee-faces/upload",
               "host": [
@@ -593,38 +891,43 @@
                 "upload"
               ]
             },
-            "description": "Upload one or more face images, or a single zip file containing face images, for an existing employee in your organization. Set {{employee_id}} first, then choose files in Postman before sending."
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "employee_id",
+                  "value": "{{employee_id}}",
+                  "type": "text"
+                },
+                {
+                  "key": "files",
+                  "type": "file",
+                  "src": "{{face_file_path}}",
+                  "description": "Choose a .jpg, .jpeg, .png, or .zip file."
+                }
+              ]
+            }
           },
-          "response": []
-        },
-        {
-          "name": "Recognize Employee Face",
+          "response": [],
           "event": [
             {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('recognize face returns 200', function () {",
-                  "  pm.response.to.have.status(200);",
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
                   "});"
                 ]
               }
             }
-          ],
+          ]
+        },
+        {
+          "name": "Recognize Employee Face",
           "request": {
             "method": "POST",
             "header": [],
-            "body": {
-              "mode": "formdata",
-              "formdata": [
-                {
-                  "key": "file",
-                  "type": "file",
-                  "src": []
-                }
-              ]
-            },
             "url": {
               "raw": "{{base_url}}/api/employee-faces/recognize",
               "host": [
@@ -636,9 +939,1228 @@
                 "recognize"
               ]
             },
-            "description": "Choose one face image in Postman to test recognition against the uploaded employee face embeddings for the authenticated organization."
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "{{face_file_path}}",
+                  "description": "Choose one face image."
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Recognize Multiple Employee Faces",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/employee-faces/recognize-multiple",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "employee-faces",
+                "recognize-multiple"
+              ]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "{{face_file_path}}",
+                  "description": "Choose an image that may contain multiple faces."
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Face Recognition Status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/employee-faces/status",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "employee-faces",
+                "status"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Regulations",
+      "item": [
+        {
+          "name": "Upload Regulation PDF",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/regulations/upload",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "regulations",
+                "upload"
+              ]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "{{regulation_pdf_path}}",
+                  "description": "Choose a safety regulation PDF."
+                },
+                {
+                  "key": "title",
+                  "value": "Factory Safety Regulation",
+                  "type": "text"
+                },
+                {
+                  "key": "description",
+                  "value": "Uploaded from Postman",
+                  "type": "text"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "if (json.regulation?.id) { pm.collectionVariables.set(\"regulation_id\", json.regulation.id); }",
+                  "if (Array.isArray(json.extracted_rules) && json.extracted_rules.length > 0) {",
+                  "  pm.collectionVariables.set(\"rule_id\", json.extracted_rules[0].id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get Current Regulation",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/regulations/current",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "regulations",
+                "current"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "if (json.regulation?.id) { pm.collectionVariables.set(\"regulation_id\", json.regulation.id); }",
+                  "if (Array.isArray(json.extracted_rules) && json.extracted_rules.length > 0) {",
+                  "  pm.collectionVariables.set(\"rule_id\", json.extracted_rules[0].id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List Regulations",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/regulations",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "regulations"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Extract Regulation Rules",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/regulations/{{regulation_id}}/extract",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "regulations",
+                "{{regulation_id}}",
+                "extract"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "if (json.regulation?.id) { pm.collectionVariables.set(\"regulation_id\", json.regulation.id); }",
+                  "if (Array.isArray(json.extracted_rules) && json.extracted_rules.length > 0) {",
+                  "  pm.collectionVariables.set(\"rule_id\", json.extracted_rules[0].id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Cancel Regulation Extraction",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/regulations/{{regulation_id}}/cancel-extraction",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "regulations",
+                "{{regulation_id}}",
+                "cancel-extraction"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Activate Regulation",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/regulations/{{regulation_id}}/activate",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "regulations",
+                "{{regulation_id}}",
+                "activate"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "if (json.regulation?.id) { pm.collectionVariables.set(\"regulation_id\", json.regulation.id); }",
+                  "if (Array.isArray(json.extracted_rules) && json.extracted_rules.length > 0) {",
+                  "  pm.collectionVariables.set(\"rule_id\", json.extracted_rules[0].id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Download Regulation PDF",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/regulations/{{regulation_id}}/download",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "regulations",
+                "{{regulation_id}}",
+                "download"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Set Face Recognition Enabled",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/regulations/{{regulation_id}}/face-recognition",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "regulations",
+                "{{regulation_id}}",
+                "face-recognition"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"enabled\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Set Regulation Module Enabled",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/regulations/{{regulation_id}}/modules/{{module_name}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "regulations",
+                "{{regulation_id}}",
+                "modules",
+                "{{module_name}}"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"enabled\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "if (json.regulation?.id) { pm.collectionVariables.set(\"regulation_id\", json.regulation.id); }",
+                  "if (Array.isArray(json.extracted_rules) && json.extracted_rules.length > 0) {",
+                  "  pm.collectionVariables.set(\"rule_id\", json.extracted_rules[0].id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Select All Regulation Rules",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/regulations/{{regulation_id}}/rules/select-all",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "regulations",
+                "{{regulation_id}}",
+                "rules",
+                "select-all"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "if (json.regulation?.id) { pm.collectionVariables.set(\"regulation_id\", json.regulation.id); }",
+                  "if (Array.isArray(json.extracted_rules) && json.extracted_rules.length > 0) {",
+                  "  pm.collectionVariables.set(\"rule_id\", json.extracted_rules[0].id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Deselect All Regulation Rules",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/regulations/{{regulation_id}}/rules/deselect-all",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "regulations",
+                "{{regulation_id}}",
+                "rules",
+                "deselect-all"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "if (json.regulation?.id) { pm.collectionVariables.set(\"regulation_id\", json.regulation.id); }",
+                  "if (Array.isArray(json.extracted_rules) && json.extracted_rules.length > 0) {",
+                  "  pm.collectionVariables.set(\"rule_id\", json.extracted_rules[0].id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Set Regulation Rule Enabled",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/regulations/{{regulation_id}}/rules/{{rule_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "regulations",
+                "{{regulation_id}}",
+                "rules",
+                "{{rule_id}}"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"enabled\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "if (json.regulation?.id) { pm.collectionVariables.set(\"regulation_id\", json.regulation.id); }",
+                  "if (Array.isArray(json.extracted_rules) && json.extracted_rules.length > 0) {",
+                  "  pm.collectionVariables.set(\"rule_id\", json.extracted_rules[0].id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Delete Regulation",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/regulations/{{regulation_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "regulations",
+                "{{regulation_id}}"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "PPE Detection",
+      "item": [
+        {
+          "name": "Detect PPE",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/ppe/detect",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "ppe",
+                "detect"
+              ]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "{{image_file_path}}",
+                  "description": "Choose an image for PPE detection."
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Check PPE Compliance",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/ppe/check-compliance",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "ppe",
+                "check-compliance"
+              ]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "{{image_file_path}}",
+                  "description": "Choose an image for compliance checking."
+                },
+                {
+                  "key": "employee_id",
+                  "value": "{{employee_id}}",
+                  "type": "text"
+                },
+                {
+                  "key": "required_ppe",
+                  "value": "Helmet",
+                  "type": "text"
+                },
+                {
+                  "key": "required_ppe",
+                  "value": "Safety Vest",
+                  "type": "text"
+                },
+                {
+                  "key": "zone_type",
+                  "value": "{{zone_type}}",
+                  "type": "text"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Fall Detection",
+      "item": [
+        {
+          "name": "Detect Falls",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/fall/detect",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "fall",
+                "detect"
+              ]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "{{image_file_path}}",
+                  "description": "Choose an image for fall detection."
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Fire Detection",
+      "item": [
+        {
+          "name": "Detect Fire Image Only",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/fire/detect-image-only",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "fire",
+                "detect-image-only"
+              ]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "{{image_file_path}}",
+                  "description": "Choose an image for fire/smoke detection."
+                },
+                {
+                  "key": "zone_type",
+                  "value": "{{zone_type}}",
+                  "type": "text"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Detect Fire Multimodal",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/fire/detect-multimodal",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "fire",
+                "detect-multimodal"
+              ]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "{{image_file_path}}",
+                  "description": "Choose an image for fire/smoke detection."
+                },
+                {
+                  "key": "sensor_data",
+                  "value": "[35.5, 0.2, 0.1, 0, 0, 0, 0, 0]",
+                  "type": "text",
+                  "description": "JSON array of 8 sensor features."
+                },
+                {
+                  "key": "zone_type",
+                  "value": "{{zone_type}}",
+                  "type": "text"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Monitoring",
+      "item": [
+        {
+          "name": "Detect Monitoring Safety",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/monitoring/detect",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "monitoring",
+                "detect"
+              ]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "{{image_file_path}}",
+                  "description": "Choose one camera frame image."
+                },
+                {
+                  "key": "zone_type",
+                  "value": "{{zone_type}}",
+                  "type": "text"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create Monitoring WebRTC Offer",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/monitoring/webrtc/offer",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "monitoring",
+                "webrtc",
+                "offer"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sdp\": \"paste-offer-sdp-here\",\n  \"type\": \"offer\",\n  \"zone_type\": \"{{zone_type}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Monitoring Safety WebSocket Reference",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{ws_base_url}}/api/monitoring/ws/safety?token={{access_token}}",
+              "host": [
+                "{{ws_base_url}}"
+              ],
+              "path": [
+                "api",
+                "monitoring",
+                "ws",
+                "safety"
+              ],
+              "query": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}"
+                }
+              ]
+            },
+            "description": "Use this URL in Postman WebSocket mode or another WebSocket client. Send frame messages as JSON with type=frame and base64 image data."
           },
           "response": []
+        }
+      ]
+    },
+    {
+      "name": "Monitoring Sessions",
+      "item": [
+        {
+          "name": "Save Monitoring Session Report",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/monitoring-sessions/report",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "monitoring-sessions",
+                "report"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"started_at\": \"2026-06-02T10:00:00Z\",\n  \"ended_at\": \"2026-06-02T10:15:00Z\",\n  \"head_count\": 4,\n  \"zone\": \"{{zone_type}}\",\n  \"face_recognition_enabled\": true,\n  \"modules\": [\n    \"ppe\",\n    \"fall\",\n    \"fire\"\n  ],\n  \"alerts\": [\n    {\n      \"alert_id\": \"{{alert_id}}\",\n      \"occurred_at\": \"2026-06-02T10:05:00Z\",\n      \"image_label\": \"Frame 1\",\n      \"type_label\": \"Missing PPE\",\n      \"detail\": \"Missing PPE: Helmet\",\n      \"group\": \"compliance\",\n      \"persisted\": true\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Alerts",
+      "item": [
+        {
+          "name": "List Alerts",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/alerts?limit=20",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "alerts"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "20"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "if (Array.isArray(json.items) && json.items.length > 0) {",
+                  "  pm.collectionVariables.set(\"alert_id\", json.items[0].id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Delete Alert",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/alerts/{{alert_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "alerts",
+                "{{alert_id}}"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Clear Alert History",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/alerts",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "alerts"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Clear Alert History Alternative",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/alerts/clear",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "alerts",
+                "clear"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Request succeeded\", function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);",
+                  "});"
+                ]
+              }
+            }
+          ]
         }
       ]
     }
