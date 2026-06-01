@@ -3,9 +3,12 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import * as z from 'zod';
 import { toast } from 'sonner';
-import { Check, Loader2 } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
 import { Footer } from '../components/Footer';
+import { PasswordInput } from '../components/PasswordInput';
+import { PasswordRequirementsList } from '../components/PasswordRequirementsList';
 import { registerOrganization } from '../lib/api';
+import { isStrongPassword, PASSWORD_REQUIREMENTS_ERROR } from '../lib/passwordValidation';
 import logoImage from '../../assets/images/logo.png';
 
 // Letters (any language) and spaces only.
@@ -32,11 +35,7 @@ const signUpSchema = z.object({
     .min(1, 'Email is required')
     .email('Please enter a valid email address'),
   password: z.string()
-    .min(8, 'At least 8 characters')
-    .regex(/[A-Z]/, 'Contains uppercase letter')
-    .regex(/[a-z]/, 'Contains lowercase letter')
-    .regex(/[0-9]/, 'Contains number')
-    .regex(/[^A-Za-z0-9]/, 'Contains symbol'),
+    .refine(isStrongPassword, PASSWORD_REQUIREMENTS_ERROR),
   confirmPassword: z.string().min(1, 'Please confirm your password')
 }).refine((data) => data.password === data.confirmPassword, {
   message: "Passwords do not match",
@@ -67,14 +66,6 @@ export function SignUpPage() {
   });
 
   const password = watch('password');
-
-  const passwordRequirements = [
-    { text: 'At least 8 characters', met: password?.length >= 8 },
-    { text: 'Contains uppercase letter', met: /[A-Z]/.test(password || '') },
-    { text: 'Contains lowercase letter', met: /[a-z]/.test(password || '') },
-    { text: 'Contains number', met: /[0-9]/.test(password || '') },
-    { text: 'Contains symbol', met: /[^A-Za-z0-9]/.test(password || '') }
-  ];
 
   const onSubmit = async (data: SignUpFormValues) => {
     try {
@@ -212,8 +203,7 @@ export function SignUpPage() {
 
               <div>
                 <label className="block text-[#8b7355] mb-1.5 text-sm">Password</label>
-                <input
-                  type="password"
+                <PasswordInput
                   {...register('password')}
                   className={`w-full px-3 py-2 rounded-xl border ${errors.password ? 'border-red-500' : 'border-[#e0d5c7]'} focus:outline-none focus:border-[#d87545] bg-white text-[#4a3c2a] text-sm`}
                 />
@@ -222,8 +212,7 @@ export function SignUpPage() {
 
               <div>
                 <label className="block text-[#8b7355] mb-1.5 text-sm">Confirm Password</label>
-                <input
-                  type="password"
+                <PasswordInput
                   {...register('confirmPassword')}
                   className={`w-full px-3 py-2 rounded-xl border ${errors.confirmPassword ? 'border-red-500' : 'border-[#e0d5c7]'} focus:outline-none focus:border-[#d87545] bg-white text-[#4a3c2a] text-sm`}
                 />
@@ -250,20 +239,7 @@ export function SignUpPage() {
               </p>
             </form>
 
-            <div className="bg-[#fde8d8] rounded-2xl p-5 border border-[#e0d5c7]">
-              <h3 className="font-serif text-base text-[#9e2a2b] mb-3">Password Requirements</h3>
-              <div className="space-y-2">
-                {passwordRequirements.map((req, index) => (
-                  <div key={index} className="flex items-center gap-2">
-                    <div className={`w-4 h-4 rounded-full flex items-center justify-center ${req.met ? 'bg-green-500' : 'bg-gray-300'
-                      }`}>
-                      {req.met && <Check className="w-2.5 h-2.5 text-white" />}
-                    </div>
-                    <span className={`text-xs ${req.met ? 'text-green-700' : 'text-[#8b7355]'}`}>{req.text}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
+            <PasswordRequirementsList password={password || ''} />
           </div>
         </div>
       </div>

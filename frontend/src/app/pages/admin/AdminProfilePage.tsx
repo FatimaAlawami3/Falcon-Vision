@@ -3,16 +3,18 @@ import { Link } from 'react-router-dom';
 import { ArrowLeft } from 'lucide-react';
 import { Navigation } from '../../components/Navigation';
 import { Footer } from '../../components/Footer';
+import { PasswordInput } from '../../components/PasswordInput';
+import { PasswordRequirementsList } from '../../components/PasswordRequirementsList';
 import { WarningModal } from '../../components/WarningModal';
 import { formatRoleLabel, getAccessToken, getAuthUser, saveAuthSession } from '../../lib/auth';
 import { updateMyProfile } from '../../lib/api';
+import { getPasswordError } from '../../lib/passwordValidation';
 
 // Saudi mobile format: 05 followed by 8 digits (10 digits total).
 const PHONE_PATTERN = /^05\d{8}$/;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 // Letters (any language) and spaces only.
 const NAME_PATTERN = /^[\p{L} ]+$/u;
-const MIN_PASSWORD_LENGTH = 8;
 
 type ProfileField = 'fullName' | 'email' | 'phone' | 'jobTitle' | 'password';
 type ProfileErrors = Partial<Record<ProfileField, string>>;
@@ -38,9 +40,7 @@ function validateProfileField(field: ProfileField, rawValue: string, treatEmptyA
       return undefined;
     case 'password':
       if (!value) return undefined;
-      return value.length >= MIN_PASSWORD_LENGTH
-        ? undefined
-        : `Password must be at least ${MIN_PASSWORD_LENGTH} characters.`;
+      return getPasswordError(value);
     default:
       return undefined;
   }
@@ -240,8 +240,7 @@ export function AdminProfilePage() {
 
               <div>
                 <label className="block text-[#6b5d4f] mb-2">New Password</label>
-                <input
-                  type="password"
+                <PasswordInput
                   value={password}
                   onChange={(e) => {
                     const value = e.target.value;
@@ -252,6 +251,10 @@ export function AdminProfilePage() {
                   className={inputClass(Boolean(errors.password))}
                 />
                 <FieldError message={errors.password} />
+                <PasswordRequirementsList
+                  password={password}
+                  className="mt-3 rounded-2xl border border-[#d4cbb7] bg-[#f9f6ef] p-4"
+                />
               </div>
 
               <button

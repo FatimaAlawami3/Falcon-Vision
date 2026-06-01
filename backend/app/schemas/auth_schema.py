@@ -3,6 +3,7 @@ import re
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from app.core.constants import UserRole
+from app.core.password_validation import validate_password_strength
 
 # Saudi mobile format: 05 followed by 8 digits (10 digits total).
 PHONE_PATTERN = re.compile(r"^05\d{8}$")
@@ -17,7 +18,7 @@ class OrganizationRegisterRequest(BaseModel):
 
     admin_full_name: str = Field(min_length=2, max_length=120)
     admin_email: EmailStr
-    admin_password: str = Field(min_length=8, max_length=72)
+    admin_password: str = Field(max_length=72)
     admin_phone: str = Field(min_length=1, max_length=30)
 
     @field_validator("admin_full_name")
@@ -36,6 +37,11 @@ class OrganizationRegisterRequest(BaseModel):
             raise ValueError("Phone number must start with 05 and be 10 digits (e.g. 0512345678).")
         return cleaned
 
+    @field_validator("admin_password")
+    @classmethod
+    def _check_admin_password(cls, value: str) -> str:
+        return validate_password_strength(value)
+
 
 class LoginRequest(BaseModel):
     email: EmailStr
@@ -44,7 +50,12 @@ class LoginRequest(BaseModel):
 
 class ForgotPasswordRequest(BaseModel):
     email: EmailStr
-    password: str = Field(min_length=8, max_length=72)
+    password: str = Field(max_length=72)
+
+    @field_validator("password")
+    @classmethod
+    def _check_password(cls, value: str) -> str:
+        return validate_password_strength(value)
 
 
 class ForgotPasswordResponse(BaseModel):
@@ -70,7 +81,7 @@ class AuthUserResponse(BaseModel):
 class CurrentUserUpdateRequest(BaseModel):
     full_name: str | None = Field(default=None, min_length=2, max_length=120)
     email: EmailStr | None = None
-    password: str | None = Field(default=None, min_length=8, max_length=72)
+    password: str | None = Field(default=None, max_length=72)
     phone: str | None = Field(default=None, max_length=30)
     job_title: str | None = Field(default=None, max_length=80)
 
@@ -95,6 +106,13 @@ class CurrentUserUpdateRequest(BaseModel):
         if not PHONE_PATTERN.fullmatch(cleaned):
             raise ValueError("Phone number must start with 05 and be 10 digits (e.g. 0512345678).")
         return cleaned
+
+    @field_validator("password")
+    @classmethod
+    def _check_password(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return validate_password_strength(value)
 
 
 class AuthOrganizationResponse(BaseModel):

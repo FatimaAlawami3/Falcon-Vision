@@ -5,6 +5,7 @@ import * as z from 'zod';
 import { toast } from 'sonner';
 import { Loader2 } from 'lucide-react';
 import { Footer } from '../components/Footer';
+import { PasswordInput } from '../components/PasswordInput';
 import { getMe, login } from '../lib/api';
 import { getHomePathForRole, saveAuthSession } from '../lib/auth';
 import logoImage from '../../assets/images/logo.png';
@@ -74,8 +75,7 @@ export function LoginPage() {
 
             <div>
               <label className="block text-[#8b7355] mb-1.5 text-sm">Password</label>
-              <input
-                type="password"
+              <PasswordInput
                 {...register('password')}
                 className={`w-full px-3 py-2 rounded-xl border ${errors.password ? 'border-red-500' : 'border-[#e0d5c7]'} focus:outline-none focus:border-[#d87545] bg-white text-[#4a3c2a] text-sm`}
                 placeholder="Enter your password"

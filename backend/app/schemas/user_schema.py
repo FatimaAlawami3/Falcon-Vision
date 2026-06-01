@@ -4,6 +4,7 @@ from datetime import datetime
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from app.core.constants import UserRole, UserStatus
+from app.core.password_validation import validate_password_strength
 
 # Supervisor ID: exactly 5 digits (matches the linked employee ID).
 ID_PATTERN = re.compile(r"^\d{5}$")
@@ -45,7 +46,7 @@ def _validate_phone(value: str | None) -> str | None:
 class UserCreateRequest(BaseModel):
     full_name: str = Field(min_length=2, max_length=120)
     email: EmailStr
-    password: str = Field(min_length=8, max_length=72)
+    password: str = Field(max_length=72)
     role: UserRole = UserRole.SUPERVISOR
     employee_id: str | None = Field(default=None, min_length=1, max_length=50)
     phone: str | None = Field(default=None, max_length=30)
@@ -66,11 +67,16 @@ class UserCreateRequest(BaseModel):
     def _check_phone(cls, value: str | None) -> str | None:
         return _validate_phone(value)
 
+    @field_validator("password")
+    @classmethod
+    def _check_password(cls, value: str) -> str:
+        return validate_password_strength(value)
+
 
 class UserUpdateRequest(BaseModel):
     full_name: str | None = Field(default=None, min_length=2, max_length=120)
     email: EmailStr | None = None
-    password: str | None = Field(default=None, min_length=8, max_length=72)
+    password: str | None = Field(default=None, max_length=72)
     role: UserRole | None = None
     employee_id: str | None = Field(default=None, min_length=1, max_length=50)
     phone: str | None = Field(default=None, max_length=30)
@@ -90,6 +96,13 @@ class UserUpdateRequest(BaseModel):
     @classmethod
     def _check_phone(cls, value: str | None) -> str | None:
         return _validate_phone(value)
+
+    @field_validator("password")
+    @classmethod
+    def _check_password(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return validate_password_strength(value)
 
 
 class UserStatusUpdateRequest(BaseModel):

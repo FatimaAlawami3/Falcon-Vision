@@ -3,9 +3,12 @@ import { Link } from 'react-router-dom';
 import { ArrowLeft, Check, Edit2, Plus, Trash2, X } from 'lucide-react';
 import { Navigation } from '../../components/Navigation';
 import { Footer } from '../../components/Footer';
+import { PasswordInput } from '../../components/PasswordInput';
+import { PasswordRequirementsList } from '../../components/PasswordRequirementsList';
 import { WarningModal } from '../../components/WarningModal';
 import { ConfirmationModal } from '../../components/ConfirmationModal';
 import { getAccessToken } from '../../lib/auth';
+import { getPasswordError } from '../../lib/passwordValidation';
 import {
   createUser,
   deleteUser,
@@ -43,7 +46,6 @@ const PHONE_PATTERN = /^05\d{8}$/;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 // Letters (any language) and spaces only.
 const NAME_PATTERN = /^[\p{L} ]+$/u;
-const MIN_PASSWORD_LENGTH = 8;
 
 type SupervisorFormErrors = Partial<Record<keyof SupervisorFormState, string>>;
 
@@ -80,9 +82,7 @@ function validateField(
         : 'Phone must start with 05 and be 10 digits (e.g. 0512345678).';
     case 'password':
       if (!value) return treatEmptyAsError && passwordRequired ? 'A temporary password is required.' : undefined;
-      return value.length >= MIN_PASSWORD_LENGTH
-        ? undefined
-        : `Password must be at least ${MIN_PASSWORD_LENGTH} characters.`;
+      return getPasswordError(value);
     default:
       return undefined;
   }
@@ -445,8 +445,7 @@ export function MonitorAccessPermissionPage() {
                     <FieldError message={newErrors.phone} />
                   </div>
                   <div>
-                    <input
-                      type="password"
+                    <PasswordInput
                       placeholder="Temporary password"
                       value={newSupervisor.password}
                       onChange={(e) => {
@@ -457,6 +456,10 @@ export function MonitorAccessPermissionPage() {
                       className={inputClass(Boolean(newErrors.password))}
                     />
                     <FieldError message={newErrors.password} />
+                    <PasswordRequirementsList
+                      password={newSupervisor.password}
+                      className="mt-3 rounded-2xl border border-[#e7cdb8] bg-[#fff8f2] p-4"
+                    />
                   </div>
                   <select
                     value={newSupervisor.status}
@@ -600,8 +603,7 @@ export function MonitorAccessPermissionPage() {
                                   <FieldError message={editErrors.phone} />
                                 </div>
                                 <div>
-                                  <input
-                                    type="password"
+                                  <PasswordInput
                                     value={editSupervisor.password}
                                     onChange={(e) => {
                                       const value = e.target.value;
@@ -610,9 +612,13 @@ export function MonitorAccessPermissionPage() {
                                     }}
                                     placeholder="Reset password (optional)"
                                     className={inputClass(Boolean(editErrors.password), 'white')}
-                                  />
-                                  <FieldError message={editErrors.password} />
-                                </div>
+                                    />
+                                    <FieldError message={editErrors.password} />
+                                    <PasswordRequirementsList
+                                      password={editSupervisor.password}
+                                      className="mt-3 rounded-2xl border border-[#e7cdb8] bg-white p-4"
+                                    />
+                                  </div>
                               </div>
                             ) : (
                               <div>

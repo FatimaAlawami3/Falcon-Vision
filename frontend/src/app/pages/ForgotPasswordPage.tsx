@@ -2,8 +2,11 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Loader2 } from 'lucide-react';
 import { Footer } from '../components/Footer';
+import { PasswordInput } from '../components/PasswordInput';
+import { PasswordRequirementsList } from '../components/PasswordRequirementsList';
 import { WarningModal } from '../components/WarningModal';
 import { forgotPassword } from '../lib/api';
+import { getPasswordError } from '../lib/passwordValidation';
 import logoImage from '../../assets/images/logo.png';
 
 export function ForgotPasswordPage() {
@@ -26,11 +29,12 @@ export function ForgotPasswordPage() {
       return;
     }
 
-    if (password.length < 8) {
+    const passwordError = getPasswordError(password);
+    if (passwordError) {
       setModalState({
         isOpen: true,
         title: 'Weak Password',
-        message: 'Your new password must be at least 8 characters long.',
+        message: passwordError,
       });
       return;
     }
@@ -100,8 +104,7 @@ export function ForgotPasswordPage() {
 
             <div>
               <label className="block text-[#8b7355] mb-2">New Password</label>
-              <input
-                type="password"
+              <PasswordInput
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 className="w-full px-4 py-3 rounded-xl border border-[#e0d5c7] focus:outline-none focus:border-[#d87545]"
@@ -112,8 +115,7 @@ export function ForgotPasswordPage() {
 
             <div>
               <label className="block text-[#8b7355] mb-2">Confirm New Password</label>
-              <input
-                type="password"
+              <PasswordInput
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
                 className="w-full px-4 py-3 rounded-xl border border-[#e0d5c7] focus:outline-none focus:border-[#d87545]"
@@ -121,6 +123,8 @@ export function ForgotPasswordPage() {
                 required
               />
             </div>
+
+            <PasswordRequirementsList password={password} className="bg-[#fde8d8] rounded-2xl p-4 border border-[#e0d5c7]" />
 
             <button
               type="submit"
